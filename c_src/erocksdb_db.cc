@@ -1355,6 +1355,8 @@ Put(
     ReferencePtr<DbObject> db_ptr;
     ReferencePtr<erocksdb::ColumnFamilyObject> cf_ptr;
     ErlNifBinary key, value;
+    ERL_NIF_TERM arg_opts;
+
     if(!enif_get_db(env, argv[0], &db_ptr))
         return enif_make_badarg(env);
 
@@ -1367,6 +1369,7 @@ Put(
                 !enif_inspect_binary(env, argv[3], &value))
             return enif_make_badarg(env);
         cfh = cf_ptr->m_ColumnFamily;
+        arg_opts = argv[4];
     }
     else
     {
@@ -1374,9 +1377,10 @@ Put(
                 !enif_inspect_binary(env, argv[2], &value))
             return enif_make_badarg(env);
         cfh = db_ptr->m_Db->DefaultColumnFamily();
+        arg_opts = argv[3];
     }
     rocksdb::WriteOptions *opts = new rocksdb::WriteOptions;
-    fold(env, argv[3], parse_write_option, *opts);
+    fold(env, arg_opts, parse_write_option, *opts);
     rocksdb::Slice key_slice(reinterpret_cast<char*>(key.data), key.size);
     rocksdb::Slice value_slice(reinterpret_cast<char*>(value.data), value.size);
     status = db_ptr->m_Db->Put(*opts, cfh, key_slice, value_slice);
