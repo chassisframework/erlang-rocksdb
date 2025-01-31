@@ -952,7 +952,7 @@ iterator_refresh(_ITRHandle) ->
 
 %% @doc
 %% Close a iterator
--spec(iterator_close(ITRHandle) -> ok when ITRHandle::itr_handle()).
+-spec(iterator_close(ITRHandle) -> ok | {error, _} when ITRHandle::itr_handle()).
 iterator_close(_ITRHandle) ->
     ?nif_stub.
 
