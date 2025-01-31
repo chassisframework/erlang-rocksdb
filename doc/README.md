@@ -2,16 +2,16 @@
 
 # erlang-rocksdb - Erlang wrapper for RocksDB. #
 
-Copyright (c) 2016-2022 Benoît Chesneau.
+Copyright (c) 2016-2025 Benoît Chesneau.
 
-__Version:__ 1.8.0 Erlang wrapper for RocksDB.
+__Version:__ 1.9.0 Erlang wrapper for RocksDB.
 
 Feedback and pull requests welcome! If a particular feature of RocksDB is important to you, please let me know by opening an issue, and I'll prioritize it.
 
 ## Features
 
-- rocksdb 7.7.3 with snappy 1.1.10, lz4 1.8.3
-- Erlang 19.3 and sup with dirty-nifs enabled
+- rocksdb 9.10.0 with snappy 1.1.10, lz4 1.8.3
+- Erlang 22 and sup with dirty-nifs enabled
 - all basics db operations
 - batchs support
 - snapshots support

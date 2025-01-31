@@ -1246,7 +1246,7 @@ call iterator_move function on the iterator before using it).
 ### iterator_close/1 ###
 
 <pre><code>
-iterator_close(ITRHandle) -&gt; ok
+iterator_close(ITRHandle) -&gt; ok | {error, term()}
 </code></pre>
 
 <ul class="definitions"><li><code>ITRHandle = <a href="#type-itr_handle">itr_handle()</a></code></li></ul>
@@ -1508,7 +1508,7 @@ Open RocksDB with the specified column families
 ### open_backup_engine/1 ###
 
 <pre><code>
-open_backup_engine(Path::string) -&gt; {ok, <a href="#type-backup_engine">backup_engine()</a>} | {error, term()}
+open_backup_engine(Path::string()) -&gt; {ok, <a href="#type-backup_engine">backup_engine()</a>} | {error, term()}
 </code></pre>
 <br />
 
