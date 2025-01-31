@@ -309,7 +309,6 @@ ERL_NIF_TERM ATOM_ALLOW_MMAP_WRITES;
 ERL_NIF_TERM ATOM_IS_FD_CLOSE_ON_EXEC;
 ERL_NIF_TERM ATOM_STATS_DUMP_PERIOD_SEC;
 ERL_NIF_TERM ATOM_ADVISE_RANDOM_ON_OPEN;
-ERL_NIF_TERM ATOM_ACCESS_HINT;
 ERL_NIF_TERM ATOM_COMPACTION_READAHEAD_SIZE;
 ERL_NIF_TERM ATOM_USE_ADAPTIVE_MUTEX;
 ERL_NIF_TERM ATOM_BYTES_PER_SYNC;
@@ -390,12 +389,6 @@ ERL_NIF_TERM ATOM_SEEK;
 
 // Related to Iterator Value to be retrieved
 ERL_NIF_TERM ATOM_KEYS_ONLY;
-
-// Related to Access Hint
-ERL_NIF_TERM ATOM_ACCESS_HINT_NORMAL;
-ERL_NIF_TERM ATOM_ACCESS_HINT_SEQUENTIAL;
-ERL_NIF_TERM ATOM_ACCESS_HINT_WILLNEED;
-ERL_NIF_TERM ATOM_ACCESS_HINT_NONE;
 
 // Related to Compression Type
 ERL_NIF_TERM ATOM_COMPRESSION_TYPE_SNAPPY;
@@ -660,7 +653,6 @@ try
   ATOM(erocksdb::ATOM_IS_FD_CLOSE_ON_EXEC, "is_fd_close_on_exec");
   ATOM(erocksdb::ATOM_STATS_DUMP_PERIOD_SEC, "stats_dump_period_sec");
   ATOM(erocksdb::ATOM_ADVISE_RANDOM_ON_OPEN, "advise_random_on_open");
-  ATOM(erocksdb::ATOM_ACCESS_HINT, "access_hint");
   ATOM(erocksdb::ATOM_COMPACTION_READAHEAD_SIZE, "compaction_readahead_size");
   ATOM(erocksdb::ATOM_USE_ADAPTIVE_MUTEX, "use_adaptive_mutex");
   ATOM(erocksdb::ATOM_BYTES_PER_SYNC, "bytes_per_sync");
@@ -742,12 +734,6 @@ try
 
   // Related to Iterator Value to be retrieved
   ATOM(erocksdb::ATOM_KEYS_ONLY, "keys_only");
-
-  // Related to Access Hint
-  ATOM(erocksdb::ATOM_ACCESS_HINT_NORMAL,"normal");
-  ATOM(erocksdb::ATOM_ACCESS_HINT_SEQUENTIAL,"sequential");
-  ATOM(erocksdb::ATOM_ACCESS_HINT_WILLNEED,"willneed");
-  ATOM(erocksdb::ATOM_ACCESS_HINT_NONE,"none");
 
   // Related to Compression Type
   ATOM(erocksdb::ATOM_COMPRESSION_TYPE_SNAPPY, "snappy");

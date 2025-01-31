@@ -20,6 +20,9 @@
 
 #include "erl_nif.h"
 
+#include "rocksdb/cache.h"
+#include "rocksdb/advanced_cache.h"
+
 namespace rocksdb {
     class Cache;
 }
