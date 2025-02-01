@@ -1,0 +1,74 @@
+name: Erlang CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+env:
+  ERLANG_ROCKSDB_OPTS: "-DWITH_BUNDLE_LZ4=ON -DWITH_BUNDLE_SNAPPY=ON"
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        otp:  ["25.3", "26.2", "27.2"]
+        rebar3: ['3.24.0']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{matrix.otp}}
+          rebar3-version: ${{matrix.rebar3}}
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: cmake
+          version: 1.1
+      - name: build
+        run: rebar3 eunit
+  linux-shared-libs:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        otp:  ["25.3", "26.2", "27.2"]
+        rebar3: ['3.24.0']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{matrix.otp}}
+          rebar3-version: ${{matrix.rebar3}}
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: cmake liblz4-dev libsnappy-dev
+          version: 1.1
+      - name: build
+        run: rebar3 eunit
+  macos:
+    runs-on: macos-15
+    strategy:
+      matrix:
+        otp:  ["27.2"]
+        rebar3: ['3.24.0']
+    steps:
+      - name: prepare
+        env:
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+        run: |
+          brew update
+          brew install erlang@${{ matrix.otp }}
+            echo "$(brew --prefix erlang@${{ matrix.otp }})/bin" >> $GITHUB_PATH
+      - name: install rebar3
+        run: |
+          wget https://github.com/erlang/rebar3/releases/download/${{ matrix.rebar3 }}/rebar3 && chmod +x rebar3
+          sudo mv rebar3 /usr/local/bin/ && sudo chmod +x /usr/local/bin/rebar3
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: build
+        run: make
