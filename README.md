@@ -26,17 +26,17 @@ Feedback and pull requests welcome! If a particular feature of RocksDB is import
 
 ## Usage
 
-See the [Gitlab Wiki](https://gitlab.com/barrel-db/erlang-rocksdb/wikis/home) for more explanation.
+See the [Doc](https://hexdocs.pm/rocksdb/) for more explanation.
 
 > Note: since the version **0.26.0**, `cmake>=3.4` is required to install `erlang-rocksdb`.
 
 ## Customized build ##
 
-See the [Customized builds](http://gitlab.com/barrel-db/erlang-rocksdb/blob/master/doc/customize_rocksdb_build.md) for more information.
+See the [Customized builds](https://hexdocs.pm/rocksdb/CUSTOMIZED_BUILDS.html) for more information.
 
 ## Support
 
-Support, Design and discussions are done via the [Gitlab Tracker](https://gitlab.com/barrel-db/erlang-rocksdb/issues) or [email](mailto:incoming+barrel-db/erlang-rocksdb@gitlab.com).
+Support, Design and discussions are done via the [Github Tracker](https://github.com/EnkiMultimedia/erlang-rocksdb/issues).
 
 ## License
 
