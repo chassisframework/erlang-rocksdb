@@ -1,4 +1,4 @@
-## erlang-rockksdb 1.9.0, WIP
+## erlang-rockksdb 1.9.0, released on 2025/02/01
 
 - bump to rocksdb version [9.10.0]((https://github.com/facebook/rocksdb/releases/tag/v9.10.0)
 - bump to snappy 1.2.1
