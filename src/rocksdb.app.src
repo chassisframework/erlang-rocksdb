@@ -33,13 +33,17 @@
            "do_rocksdb.sh",
            "README.md",
            "LICENSE",
+           "CHANGELOG.md",
+           "GETTING_STARTED.md",
+           "CUSTOMIZED_BUILDS.md",
+           "guides",
            "src",
            "deps",
            "c_src",
-           "doc",
            "test"]},
   {exclude_files, ["deps/rebar3",
                    "deps/rocksdb/java",
-                   "deps/rocksdb/docs"]}
+                   "deps/rocksdb/docs",
+                   "doc"]}
 
  ]}.
