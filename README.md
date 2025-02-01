@@ -41,11 +41,3 @@ Support, Design and discussions are done via the [Github Tracker](https://github
 ## License
 
 Erlang RocksDB is licensed under the Apache License 2.
-
-
-## Modules ##
-
-
-<table width="100%" border="0" summary="list of modules">
-<tr><td><a href="http://gitlab.com/barrel-db/erlang-rocksdb/blob/master/doc/rocksdb.md" class="module">rocksdb</a></td></tr></table>
-
