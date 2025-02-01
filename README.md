@@ -2,14 +2,12 @@
 
 # erlang-rocksdb - Erlang wrapper for RocksDB. #
 
-Copyright (c) 2016-2025 Benoît Chesneau.
+:[![Build Status](https://github.com/EnkiMultimedia/erlang-rocksdb/workflows/build/badge.svg)](https://github.com/EnkiMultimedia/erlang-rocksdb/actions?query=workflow%3Abuild)
+[![Hex pm](http://img.shields.io/hexpm/v/rocksdb.svg?style=flat)](https://hex.pm/packages/rocksdb)
 
-__Version:__ 1.9.0 Erlang wrapper for RocksDB.
+Copyright (c) 2016-2025 Benoît Chesneau
 
 Feedback and pull requests welcome! If a particular feature of RocksDB is important to you, please let me know by opening an issue, and I'll prioritize it.
-
-[![Build Status](https://github.com/EnkiMultimedia/erlang-rocksdb/workflows/build/badge.svg)](https://github.com/EnkiMultimedia/erlang-rocksdb/actions?query=workflow%3Abuild)
-[![Hex pm](http://img.shields.io/hexpm/v/rocksdb.svg?style=flat)](https://hex.pm/packages/rocksdb)
 
 ## Features
 
