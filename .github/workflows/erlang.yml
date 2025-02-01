@@ -53,7 +53,7 @@ jobs:
     runs-on: macos-15
     strategy:
       matrix:
-        otp:  ["27.2"]
+        otp:  ["27"]
         rebar3: ['3.24.0']
     steps:
       - name: prepare
