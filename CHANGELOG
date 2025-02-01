@@ -1,8 +1,18 @@
+erlang-rockksdb 1.9.0, WIP
+============================================
+
+- bump to rocksdb version [9.10.0]((https://github.com/facebook/rocksdb/releases/tag/v9.10.0)
+- bump to snappy 1.2.1
+- fix write_options
+- fix memory leak
+- handle manual_wal_flush option
+
+
 erlang-rocksdb 1.8.0, released on 2022/11/04
 ============================================
 
 - bring compatibility with with Apple Mac M1 and Erlang OTP 25 
-- bum to rocksdb version [7.7.3]((https://github.com/facebook/rocksdb/releases/tag/v7.7.3)
+- bump to rocksdb version [7.7.3]((https://github.com/facebook/rocksdb/releases/tag/v7.7.3)
 - add support for BLOB databases
 - add `rocksdb:transaction_rollback/1` function
 - add `rocksdb:release_transaction/1` function
