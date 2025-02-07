@@ -45,7 +45,8 @@
 #include "bitset_merge_operator.h"
 #include "counter_merge_operator.h"
 
-ERL_NIF_TERM parse_bbt_option(ErlNifEnv* env, ERL_NIF_TERM item, rocksdb::BlockBasedTableOptions& opts) {
+ERL_NIF_TERM 
+parse_bbt_option(ErlNifEnv* env, ERL_NIF_TERM item, rocksdb::BlockBasedTableOptions& opts) {
     int arity;
     const ERL_NIF_TERM* option;
     if (enif_get_tuple(env, item, &arity, &option) && 2==arity)
@@ -83,7 +84,29 @@ ERL_NIF_TERM parse_bbt_option(ErlNifEnv* env, ERL_NIF_TERM item, rocksdb::BlockB
     return erocksdb::ATOM_OK;
 }
 
-ERL_NIF_TERM parse_db_option(ErlNifEnv* env, ERL_NIF_TERM item, rocksdb::DBOptions& opts)
+ERL_NIF_TERM 
+parse_compaction_options_fifo(ErlNifEnv *env, ERL_NIF_TERM item, rocksdb::CompactionOptionsFIFO &opts)
+{
+    int arity;
+    const ERL_NIF_TERM *option;
+    if (enif_get_tuple(env, item, &arity, &option) && 2 == arity)
+    {
+        if (option[0] == erocksdb::ATOM_MAX_TABLE_FILE_SIZE)
+        {
+          ErlNifUInt64 max_table_file_size;
+          if (enif_get_uint64(env, option[1], &max_table_file_size))
+            opts.max_table_files_size = max_table_file_size;
+        }
+        else if (option[0] == erocksdb::ATOM_ALLOW_COMPACTION)
+        {
+            opts.allow_compaction = (option[1] == erocksdb::ATOM_TRUE);
+        }
+    }
+    return erocksdb::ATOM_OK;
+}
+
+ERL_NIF_TERM 
+parse_db_option(ErlNifEnv* env, ERL_NIF_TERM item, rocksdb::DBOptions& opts)
 {
     int arity;
     const ERL_NIF_TERM* option;
@@ -591,6 +614,11 @@ ERL_NIF_TERM parse_cf_option(ErlNifEnv* env, ERL_NIF_TERM item, rocksdb::ColumnF
                 opts.compaction_pri = rocksdb::CompactionPri::kOldestSmallestSeqFirst;
             }
         }
+        else if (option[0] == erocksdb::ATOM_COMPACTION_OPTIONS_FIFO) {
+            rocksdb::CompactionOptionsFIFO fifoOpts;
+            fold(env, option[1], parse_compaction_options_fifo, fifoOpts);
+            opts.compaction_options_fifo = fifoOpts;
+        }
         else if (option[0] == erocksdb::ATOM_MAX_SEQUENTIAL_SKIP_IN_ITERATIONS)
         {
             ErlNifUInt64 max_sequential_skip_in_iterations;
@@ -916,6 +944,7 @@ ERL_NIF_TERM parse_compact_range_option(ErlNifEnv *env, ERL_NIF_TERM item, rocks
 
     return erocksdb::ATOM_OK;
 }
+
 
 ERL_NIF_TERM
 parse_cf_descriptor(ErlNifEnv* env, ERL_NIF_TERM item,

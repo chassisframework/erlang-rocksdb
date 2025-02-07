@@ -269,6 +269,10 @@
 -opaque env() :: env_type() | env_handle().
 -type env_priority() :: priority_high | priority_low.
 
+-type compaction_options_fifo() :: [{max_table_file_size, pos_integer()} |
+                                    {allow_compaction, boolean()}].
+                            
+
 -type block_based_table_options() :: [{no_block_cache, boolean()} |
                                       {block_size, pos_integer()} |
                                       {block_cache, cache_handle()} |
@@ -322,6 +326,7 @@
                        {disable_auto_compactions,  boolean()} |
                        {compaction_style,  compaction_style()} |
                        {compaction_pri,  compaction_pri()} |
+                       {compaction_options_fifo, compaction_options_fifo()} |
                        {filter_deletes,  boolean()} |
                        {max_sequential_skip_in_iterations,  pos_integer()} |
                        {inplace_update_support,  boolean()} |
