@@ -529,6 +529,11 @@ ERL_NIF_TERM parse_cf_option(ErlNifEnv* env, ERL_NIF_TERM item, rocksdb::ColumnF
             if (enif_get_int(env, option[1], &num_levels))
                 opts.num_levels = num_levels;
         }
+        else if (option[0] == erocksdb::ATOM_TTL) {
+            ErlNifUInt64 ttl;
+            if (enif_get_uint64(env, option[1], &ttl))
+                opts.ttl = ttl;
+        }
         else if (option[0] == erocksdb::ATOM_LEVEL0_FILE_NUM_COMPACTION_TRIGGER)
         {
             int level0_file_num_compaction_trigger;

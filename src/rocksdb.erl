@@ -314,6 +314,7 @@
                        {compression_opts, compression_opts()} |
                        {bottommost_compression_opts, compression_opts()} |
                        {num_levels,  pos_integer()} |
+                       {ttl, pos_integer()} |
                        {level0_file_num_compaction_trigger,  integer()} |
                        {level0_slowdown_writes_trigger,  integer()} |
                        {level0_stop_writes_trigger,  integer()} |
