@@ -376,6 +376,15 @@ ERL_NIF_TERM ATOM_CHANGE_LEVEL;
 ERL_NIF_TERM ATOM_TARGET_LEVEL;
 ERL_NIF_TERM ATOM_ALLOW_WRITE_STALL;
 
+
+// Related to CompactionOptionsFIFO
+ERL_NIF_TERM ATOM_COMPACTION_OPTIONS_FIFO;
+ERL_NIF_TERM ATOM_MAX_TABLE_FILE_SIZE;
+ERL_NIF_TERM ATOM_ALLOW_COMPACTION;
+
+ERL_NIF_TERM ATOM_TTL;
+
+
 // Related to FlushOptions
 ERL_NIF_TERM ATOM_WAIT;
 
@@ -720,6 +729,13 @@ try
   ATOM(erocksdb::ATOM_CHANGE_LEVEL, "change_level");
   ATOM(erocksdb::ATOM_TARGET_LEVEL, "target_level");
   ATOM(erocksdb::ATOM_ALLOW_WRITE_STALL, "allow_write_stall");
+
+  // FIFO options
+  ATOM(erocksdb::ATOM_COMPACTION_OPTIONS_FIFO, "compaction_options_fifo");
+  ATOM(erocksdb::ATOM_MAX_TABLE_FILE_SIZE, "max_table_files_size");
+  ATOM(erocksdb::ATOM_ALLOW_COMPACTION, "allow_compaction");
+
+  ATOM(erocksdb::ATOM_TTL, "ttl");
 
   // related to FlushOptions
   ATOM(erocksdb::ATOM_WAIT, "wait");
