@@ -393,6 +393,8 @@
                        {enable_pipelined_write, boolean()} |
                        {unordered_write, boolean()} |
                        {two_write_queues, boolean()} |
+                       {prefix_extractor, {fixed_prefix_transform, integer()} | 
+                                           {capped_prefix_transform, integer()}} |
                        {statistics, statistics_handle()}].
 
 -type options() :: db_options() | cf_options().
