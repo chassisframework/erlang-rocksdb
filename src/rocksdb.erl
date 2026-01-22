@@ -1717,7 +1717,7 @@ next_update(Itr) -> tlog_next_update(Itr).
 %% Batch API
 
 %% @doc create a new batch in memory. A batch is a nif resource attached to the current process. Pay attention when you
-%% share it with other processes as it may not been released. To force its release you will need to use the close_batch
+%% share it with other processes as it may not been released. To force its release you will need to use the release_batch
 %% function.
 -spec batch() -> {ok, Batch :: batch_handle()}.
 batch() ->
