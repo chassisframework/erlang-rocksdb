@@ -436,7 +436,6 @@ IteratorMove(
         return error_tuple(env, ATOM_ERROR, status);
     }
 
-
     return enif_make_tuple3(env, ATOM_OK, slice_to_binary(env, itr->key()), slice_to_binary(env, itr->value()));
 
 }   // erocksdb::IteratorMove
@@ -574,5 +573,131 @@ IteratorColumns(
 
     return enif_make_tuple2(env, ATOM_OK, result_list);
 }   // erocksdb::IteratorColumns
+
+ERL_NIF_TERM
+GetKeys(
+    ErlNifEnv* env,
+    int argc,
+    const ERL_NIF_TERM argv[])
+{
+  ReferencePtr<DbObject> db_ptr;
+  if(!enif_get_db(env, argv[0], &db_ptr))
+    return enif_make_badarg(env);
+
+  int i = 1;
+  if(argc==3) i = 2;
+
+  if(!enif_is_list(env, argv[i]))
+    return enif_make_badarg(env);
+
+  rocksdb::ReadOptions *opts = new rocksdb::ReadOptions;
+  ItrBounds bounds;
+  if (!parse_iterator_options(env, env, argv[i], *opts, bounds))
+    {
+      delete opts;
+      return enif_make_badarg(env);
+    }
+
+  opts->allow_unprepared_value = true;
+
+  rocksdb::Iterator * itr;
+
+  if(argc==3)
+    {
+      ReferencePtr<ColumnFamilyObject> cf_ptr;
+      if(!enif_get_cf(env, argv[1], &cf_ptr))
+        {
+          delete opts;
+          delete bounds.upper_bound_slice;
+          delete bounds.lower_bound_slice;
+          return enif_make_badarg(env);
+        }
+      itr = db_ptr->m_Db->NewIterator(*opts, cf_ptr->m_ColumnFamily);
+    }
+  else
+    {
+      itr = db_ptr->m_Db->NewIterator(*opts);
+    }
+
+  std::vector<ERL_NIF_TERM> entries;
+
+  for(itr->SeekToFirst() ; itr->Valid() ; itr->Next())
+    {
+       entries.push_back(slice_to_binary(env, itr->key()));
+    }
+
+  delete itr;
+  return enif_make_list_from_array(env, &entries[0], entries.size());
+}   // erocksdb::GetKeys
+
+ERL_NIF_TERM
+GetKeysInPrefix(
+    ErlNifEnv* env,
+    int argc,
+    const ERL_NIF_TERM argv[])
+{
+  ReferencePtr<DbObject> db_ptr;
+  if(!enif_get_db(env, argv[0], &db_ptr))
+    return enif_make_badarg(env);
+
+  // 0 db       |  db
+  // 1 cf       |  prefix
+  // 2 prefix   |  readopts
+  // 3 readopts |
+  int prefix_index = 1;
+  int readopts_index = 2;
+  if(argc==4)
+    {
+      prefix_index = 2;
+      readopts_index = 3;
+    }
+
+  if(!enif_is_list(env, argv[readopts_index]) || !enif_is_binary(env, argv[prefix_index]))
+    return enif_make_badarg(env);
+
+  rocksdb::Slice prefix;
+  if(!binary_to_slice(env, argv[prefix_index], &prefix))
+    return error_einval(env);
+
+  rocksdb::ReadOptions *opts = new rocksdb::ReadOptions;
+  ItrBounds bounds;
+  if (!parse_iterator_options(env, env, argv[readopts_index], *opts, bounds))
+    {
+      delete opts;
+      return enif_make_badarg(env);
+    }
+
+  opts->allow_unprepared_value = true;
+  opts->prefix_same_as_start = true;
+
+  rocksdb::Iterator *itr;
+
+  if(argc==4)
+    {
+      ReferencePtr<ColumnFamilyObject> cf_ptr;
+      if(!enif_get_cf(env, argv[1], &cf_ptr))
+        {
+          delete opts;
+          delete bounds.upper_bound_slice;
+          delete bounds.lower_bound_slice;
+          return enif_make_badarg(env);
+        }
+      itr = db_ptr->m_Db->NewIterator(*opts, cf_ptr->m_ColumnFamily);
+    }
+  else
+    {
+      itr = db_ptr->m_Db->NewIterator(*opts);
+    }
+
+  std::vector<ERL_NIF_TERM> entries;
+
+  for(itr->Seek(prefix) ; itr->Valid() ; itr->Next())
+    {
+       entries.push_back(slice_to_binary(env, itr->key()));
+    }
+
+  delete itr;
+  return enif_make_list_from_array(env, &entries[0], entries.size());
+}   // erocksdb::GetKeysInPrefix
 
 }

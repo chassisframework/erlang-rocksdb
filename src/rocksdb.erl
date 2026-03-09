@@ -80,6 +80,8 @@
   iterator_prepare_value/1,
   iterator_close/1,
   iterator_columns/1,
+  get_keys/2, get_keys/3,
+  get_keys_in_prefix/3, get_keys_in_prefix/4,
   delete_entity/3, delete_entity/4
 ]).
 
@@ -1473,6 +1475,42 @@ iterator_close(_ITRHandle) ->
     ITRHandle::itr_handle(),
     Res :: {ok, [{binary(), binary()}]} | {error, any()}.
 iterator_columns(_ITRHandle) ->
+    ?nif_stub.
+
+%% @doc Get all the keys in the default column family
+-spec get_keys(DBHandle, ReadOpts) -> Res when
+    DBHandle::db_handle(),
+    ReadOpts::read_options(),
+    Res :: {ok, [binary()]} | {error, any()}.
+get_keys(_DBHandle, _ReadOpts) ->
+    ?nif_stub.
+
+%% @doc Get all the keys in the given ColumnFamily
+-spec get_keys(DBHandle, CFHandle, ReadOpts) -> Res when
+    DBHandle::db_handle(),
+    CFHandle::cf_handle(),
+    ReadOpts::read_options(),
+    Res :: {ok, [binary()]} | {error, any()}.
+get_keys(_DBHandle, _CFHandle, _ReadOpts) ->
+    ?nif_stub.
+
+%% @doc Get all the keys in the given prefix of the default ColumnFamily
+-spec get_keys_in_prefix(DBHandle, Prefix, ReadOpts) -> Res when
+    DBHandle::db_handle(),
+    Prefix::binary(),
+    ReadOpts::read_options(),
+    Res :: {ok, [binary()]} | {error, any()}.
+get_keys_in_prefix(_DBHandle, _Prefix, _ReadOpts) ->
+    ?nif_stub.
+
+%% @doc Get all the keys in the given prefix of the given ColumnFamily
+-spec get_keys_in_prefix(DBHandle, CFHandle, Prefix, ReadOpts) -> Res when
+    DBHandle::db_handle(),
+    CFHandle::cf_handle(),
+    Prefix::binary(),
+    ReadOpts::read_options(),
+    Res :: {ok, [binary()]} | {error, any()}.
+get_keys_in_prefix(_DBHandle, _CFHandle, _Prefix, _ReadOpts) ->
     ?nif_stub.
 
 %% @doc Delete an entity (same as regular delete).

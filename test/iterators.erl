@@ -364,8 +364,105 @@ iterator_prepare_value_test() ->
   rocksdb:destroy("test_prepare_value", []),
   rocksdb_test_util:rm_rf("test_prepare_value").
 
+
+get_keys_test() ->
+  rocksdb_test_util:rm_rf("test_get_keys"), %NOTE
+  {ok, Ref} = rocksdb:open("test_get_keys", [{create_if_missing, true}]),
+  try
+    rocksdb:put(Ref, <<"a">>, <<"x">>, []),
+    rocksdb:put(Ref, <<"c">>, <<"y">>, []),
+    rocksdb:put(Ref, <<"d">>, <<"z">>, []),
+    ok = rocksdb:flush(Ref, []),
+
+    ?assertEqual([<<"a">>, <<"c">>, <<"d">>], rocksdb:get_keys(Ref, []))
+  after
+    rocksdb:close(Ref)
+  end,
+  rocksdb:destroy("test_get_keys", []),
+  rocksdb_test_util:rm_rf("test_get_keys").
+
+cf_get_keys_test() ->
+  rocksdb_test_util:rm_rf("test_get_keys"), %NOTE
+  {ok, Ref, [DefaultH]} = rocksdb:open_with_cf("ltest", [{create_if_missing, true}], [{"default", []}]),
+  {ok, TestH} = rocksdb:create_column_family(Ref, "test", []),
+  try
+    rocksdb:put(Ref, <<"a">>, <<"x">>, []),
+    rocksdb:put(Ref, <<"c">>, <<"y">>, []),
+    rocksdb:put(Ref, <<"d">>, <<"z">>, []),
+    rocksdb:put(Ref, TestH, <<"e">>, <<"x">>, []),
+    rocksdb:put(Ref, TestH, <<"f">>, <<"y">>, []),
+    rocksdb:put(Ref, TestH, <<"g">>, <<"z">>, []),
+    ok = rocksdb:flush(Ref, []),
+
+    ?assertEqual([<<"e">>, <<"f">>, <<"g">>], rocksdb:get_keys(Ref, TestH, []))
+  after
+    rocksdb:close(Ref)
+  end,
+  rocksdb:destroy("test_get_keys", []),
+  rocksdb_test_util:rm_rf("test_get_keys").
+
+get_keys_in_prefix_test() ->
+  rocksdb_test_util:rm_rf("test_get_keys_in_prefix"), %NOTE
+  {ok, Ref} = rocksdb:open("test_get_keys_in_prefix", [{create_if_missing, true},
+                                                       {prefix_extractor, {fixed_prefix_transform, 8}}]),
+  try
+    ok = put_key(Ref, 1, 4, <<"a">>),
+    ok = put_key(Ref, 2, 5, <<"b">>),
+    ok = put_key(Ref, 2, 6, <<"c">>),
+    ok = put_key(Ref, 2, 7, <<"d">>),
+    ok = put_key(Ref, 3, 8, <<"e">>),
+    ok = rocksdb:flush(Ref, []),
+
+    Keys = [
+            test_key(2, 5),
+            test_key(2, 6),
+            test_key(2, 7)
+           ],
+
+    ?assertEqual(Keys, rocksdb:get_keys_in_prefix(Ref, << 2 : 64 >>, []))
+  after
+    rocksdb:close(Ref)
+  end,
+  rocksdb:destroy("test_get_keys_in_prefix", []),
+  rocksdb_test_util:rm_rf("test_get_keys_in_prefix").
+
+cf_get_keys_in_prefix_test() ->
+  rocksdb_test_util:rm_rf("test_get_keys_in_prefix"), %NOTE
+  {ok, Ref, [DefaultH]} = rocksdb:open("test_get_keys_in_prefix", [{create_if_missing, true},
+                                                                   {prefix_extractor, {fixed_prefix_transform, 8}}],
+                                                                  [{"default", []}]),
+  {ok, TestH} = rocksdb:create_column_family(Ref, "test", [{prefix_extractor, {fixed_prefix_transform, 8}}]),
+  try
+    ok = put_key(Ref, 1, 4, <<"a">>),
+    ok = put_key(Ref, 2, 5, <<"b">>),
+    ok = put_key(Ref, 2, 6, <<"c">>),
+    ok = put_key(Ref, 2, 7, <<"d">>),
+    ok = put_key(Ref, 3, 8, <<"e">>),
+    ok = put_key(Ref, TestH, 1, 9, <<"a">>),
+    ok = put_key(Ref, TestH, 2, 11, <<"b">>),
+    ok = put_key(Ref, TestH, 2, 12, <<"c">>),
+    ok = put_key(Ref, TestH, 2, 13, <<"d">>),
+    ok = put_key(Ref, TestH, 3, 14, <<"e">>),
+    ok = rocksdb:flush(Ref, []),
+
+    Keys = [
+            test_key(2, 11),
+            test_key(2, 12),
+            test_key(2, 13)
+           ],
+
+    ?assertEqual(Keys, rocksdb:get_keys_in_prefix(Ref, TestH, << 2 : 64 >>, []))
+  after
+    rocksdb:close(Ref)
+  end,
+  rocksdb:destroy("test_get_keys_in_prefix", []),
+  rocksdb_test_util:rm_rf("test_get_keys_in_prefix").
+
 test_key(Prefix, Suffix) when is_integer(Prefix), is_integer(Suffix) ->
   << Prefix:64, Suffix:64 >>.
 
 put_key(Db, Prefix, Suffix, Value) ->
   rocksdb:put(Db, test_key(Prefix, Suffix), Value, []).
+
+put_key(Db, Cf, Prefix, Suffix, Value) ->
+  rocksdb:put(Db, Cf, test_key(Prefix, Suffix), Value, []).

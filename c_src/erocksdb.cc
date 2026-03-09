@@ -114,6 +114,17 @@ static ErlNifFunc nif_funcs[] =
         {"iterator_close", 1, erocksdb::IteratorClose, ERL_NIF_DIRTY_JOB_IO_BOUND},
         {"iterator_columns", 1, erocksdb::IteratorColumns, ERL_NIF_DIRTY_JOB_IO_BOUND},
 
+        // bulk-get operations that use iterators
+        //
+        // iterating a large table in order to do a `fold` on the erlang side is very slow due to switching
+        // contexts between the regular scheduler (where the erlang runs) and the dirty scheduler (where the
+        // iterator runs)
+        //
+        {"get_keys", 2, erocksdb::GetKeys, ERL_NIF_DIRTY_JOB_IO_BOUND},
+        {"get_keys", 3, erocksdb::GetKeys, ERL_NIF_DIRTY_JOB_IO_BOUND},
+        {"get_keys_in_prefix", 3, erocksdb::GetKeysInPrefix, ERL_NIF_DIRTY_JOB_IO_BOUND},
+        {"get_keys_in_prefix", 4, erocksdb::GetKeysInPrefix, ERL_NIF_DIRTY_JOB_IO_BOUND},
+
         {"get_latest_sequence_number", 1, erocksdb::GetLatestSequenceNumber, ERL_NIF_REGULAR_BOUND},
 
         // transactions
