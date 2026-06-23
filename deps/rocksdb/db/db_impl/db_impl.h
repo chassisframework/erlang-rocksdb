@@ -455,19 +455,20 @@ class DBImpl : public DB {
 
   void EnableManualCompaction() override;
   void DisableManualCompaction() override;
+  void AbortAllCompactions() override;
+  void ResumeAllCompactions() override;
 
   using DB::SetOptions;
   Status SetOptions(
-      ColumnFamilyHandle* column_family,
-      const std::unordered_map<std::string, std::string>& options_map) override;
+      const std::unordered_map<ColumnFamilyHandle*,
+                               std::unordered_map<std::string, std::string>>&
+          column_families_opts_map) override;
 
   Status SetDBOptions(
       const std::unordered_map<std::string, std::string>& options_map) override;
 
   using DB::NumberLevels;
   int NumberLevels(ColumnFamilyHandle* column_family) override;
-  using DB::MaxMemCompactionLevel;
-  int MaxMemCompactionLevel(ColumnFamilyHandle* column_family) override;
   using DB::Level0StopWriteTrigger;
   int Level0StopWriteTrigger(ColumnFamilyHandle* column_family) override;
   const std::string& GetName() const override;
@@ -484,9 +485,12 @@ class DBImpl : public DB {
       const FlushOptions& options,
       const std::vector<ColumnFamilyHandle*>& column_families) override;
   Status FlushWAL(bool sync) override {
-    // TODO: plumb Env::IOActivity, Env::IOPriority
-    return FlushWAL(WriteOptions(), sync);
+    FlushWALOptions options;
+    options.sync = sync;
+    return FlushWAL(options);
   }
+
+  Status FlushWAL(const FlushWALOptions& options) override;
 
   virtual Status FlushWAL(const WriteOptions& write_options, bool sync);
   bool WALBufferIsEmpty();
@@ -568,6 +572,11 @@ class DBImpl : public DB {
   // Obtains the meta data of the specified column family of the DB.
   // TODO(yhchiang): output parameter is placed in the end in this codebase.
   void GetColumnFamilyMetaData(ColumnFamilyHandle* column_family,
+                               ColumnFamilyMetaData* metadata) override;
+
+  // Get column family metadata with filtering based on key range and level
+  void GetColumnFamilyMetaData(ColumnFamilyHandle* column_family,
+                               const GetColumnFamilyMetaDataOptions& options,
                                ColumnFamilyMetaData* metadata) override;
 
   void GetAllColumnFamilyMetaData(
@@ -1239,6 +1248,7 @@ class DBImpl : public DB {
 
   int TEST_BGCompactionsAllowed() const;
   int TEST_BGFlushesAllowed() const;
+  int TEST_NumRunningBottomCompactions() const;
   size_t TEST_GetWalPreallocateBlockSize(uint64_t write_buffer_size) const;
   void TEST_WaitForPeriodicTaskRun(std::function<void()> callback) const;
   SeqnoToTimeMapping TEST_GetSeqnoToTimeMapping() const;
@@ -1709,6 +1719,17 @@ class DBImpl : public DB {
   // recovery.
   Status LogAndApplyForRecovery(const RecoveryContext& recovery_ctx);
 
+  // Schedule background work to open and validate SST files asynchronously.
+  // Called when open_files_async is enabled.
+  void ScheduleAsyncFileOpening();
+
+  // Mark async file opening as not needed. Used by subclasses that load
+  // table files through a different mechanism (e.g., ReactiveVersionSet).
+  void MarkAsyncFileOpenNotNeeded();
+
+  // Background work function for async file opening.
+  static void BGWorkAsyncFileOpen(void* arg);
+
   void InvokeWalFilterIfNeededOnColumnFamilyToWalNumberMap();
 
   // Return true to proceed with current WAL record whose content is stored in
@@ -1719,8 +1740,12 @@ class DBImpl : public DB {
                                           Status& status, bool& stop_replay,
                                           WriteBatch& batch);
 
+  // Indicate DB was opened successfully
+  bool opened_successfully_ = false;
+
  private:
   friend class DB;
+  friend class DBImplSecondary;
   friend class ErrorHandler;
   friend class InternalStats;
   friend class PessimisticTransaction;
@@ -2141,7 +2166,7 @@ class DBImpl : public DB {
   Status InsertLogRecordToMemtable(WriteBatch* batch_to_use,
                                    uint64_t wal_number,
                                    SequenceNumber* next_sequence,
-                                   bool* has_valid_writes);
+                                   bool* has_valid_writes, bool read_only);
 
   Status MaybeWriteLevel0TableForRecovery(
       bool has_valid_writes, bool read_only, uint64_t wal_number, int job_id,
@@ -2393,11 +2418,22 @@ class DBImpl : public DB {
                           JobContext* job_context, LogBuffer* log_buffer,
                           CompactionJobInfo* compaction_job_info);
 
+  // Helper function to perform trivial move by updating manifest metadata
+  // without rewriting data files. This is called when IsTrivialMove() is true.
+  // REQUIRES: mutex held
+  // Returns: Status of the trivial move operation
+  Status PerformTrivialMove(Compaction& c, LogBuffer* log_buffer,
+                            bool& compaction_released, size_t& moved_files,
+                            size_t& moved_bytes);
+
   // REQUIRES: mutex unlocked
   void TrackOrUntrackFiles(const std::vector<std::string>& existing_data_files,
                            bool track);
 
   void MaybeScheduleFlushOrCompaction();
+
+  BackgroundJobPressure CaptureBackgroundJobPressure() const;
+  void NotifyOnBackgroundJobPressureChanged();
 
   struct FlushRequest {
     FlushReason flush_reason;
@@ -2488,6 +2524,13 @@ class DBImpl : public DB {
 
   // Schedule background tasks
   Status StartPeriodicTaskScheduler();
+
+  // Compute the repeat period for the kTriggerCompaction task, which ensures
+  // compactions not dependent on writes (flushes) are eventually triggered when
+  // there are no writes (flushes). NOT thread safe; only called during DB open
+  // (StartPeriodicTaskScheduler). KNOWN LIMITATION: doesn't get updated with
+  // dynamic option updates. (Probably not worth the extra complexity.)
+  uint64_t ComputeTriggerCompactionPeriod();
 
   // Cancel scheduled periodic tasks
   Status CancelPeriodicTaskScheduler();
@@ -2772,6 +2815,14 @@ class DBImpl : public DB {
   // compaction code paths.
   std::atomic<int> manual_compaction_paused_ = false;
 
+  // If non-zero, all compaction jobs (background automatic compactions,
+  // manual compactions via CompactRange, and foreground CompactFiles calls)
+  // are being aborted. Compactions will be signaled to stop. Any new
+  // compaction job would fail immediately. The value indicates how many threads
+  // have called AbortAllCompactions(). It is accessed in read mode outside the
+  // DB mutex in compaction code paths.
+  std::atomic<int> compaction_aborted_ = 0;
+
   // This condition variable is signaled on these conditions:
   // * whenever bg_compaction_scheduled_ goes down to 0
   // * if AnyManualCompaction, whenever a compaction finishes, even if it hasn't
@@ -3026,6 +3077,9 @@ class DBImpl : public DB {
   // stores the number of compactions are currently running
   int num_running_compactions_ = 0;
 
+  // stores the number of BOTTOM-priority compactions currently running
+  int num_running_bottom_compactions_ = 0;
+
   // number of background memtable flush jobs, submitted to the HIGH pool
   int bg_flush_scheduled_ = 0;
 
@@ -3034,6 +3088,19 @@ class DBImpl : public DB {
 
   // number of background obsolete file purge jobs, submitted to the HIGH pool
   int bg_purge_scheduled_ = 0;
+
+  // number of pressure callbacks currently in progress (for destructor safety)
+  int bg_pressure_callback_in_progress_ = 0;
+
+  enum class AsyncFileOpenState : uint8_t {
+    kNotScheduled = 0,  // Async file opening has not been scheduled.
+    kScheduled,         // Async file opening is in-flight in the HIGH pool.
+    kComplete,          // Async file opening has finished (or was not needed).
+  };
+
+  // Tracks whether background async file opening has been scheduled/completed.
+  AsyncFileOpenState bg_async_file_open_state_ =
+      AsyncFileOpenState::kNotScheduled;
 
   std::deque<ManualCompactionState*> manual_compaction_dequeue_;
 
@@ -3089,9 +3156,6 @@ class DBImpl : public DB {
 
   // Guard against multiple concurrent refitting
   bool refitting_level_ = false;
-
-  // Indicate DB was opened successfully
-  bool opened_successfully_ = false;
 
   // The min threshold to triggere bottommost compaction for removing
   // garbages, among all column families.
@@ -3160,7 +3224,7 @@ class DBImpl : public DB {
   // installed to MANIFEST first.
   InstrumentedCondVar atomic_flush_install_cv_;
 
-  bool wal_in_db_path_;
+  bool wal_in_db_path_ = false;
   std::atomic<uint64_t> max_total_wal_size_;
 
   BlobFileCompletionCallback blob_callback_;

@@ -29,7 +29,7 @@ IndexBuilder* IndexBuilder::CreateIndexBuilder(
     const InternalKeySliceTransform* int_key_slice_transform,
     const bool use_value_delta_encoding,
     const BlockBasedTableOptions& table_opt, size_t ts_sz,
-    const bool persist_user_defined_timestamps) {
+    const bool persist_user_defined_timestamps, Statistics* statistics) {
   IndexBuilder* result = nullptr;
   switch (index_type) {
     case BlockBasedTableOptions::kBinarySearch: {
@@ -37,7 +37,8 @@ IndexBuilder* IndexBuilder::CreateIndexBuilder(
           comparator, table_opt.index_block_restart_interval,
           table_opt.format_version, use_value_delta_encoding,
           table_opt.index_shortening, /* include_first_key */ false, ts_sz,
-          persist_user_defined_timestamps);
+          persist_user_defined_timestamps, statistics,
+          table_opt.uniform_cv_threshold);
       break;
     }
     case BlockBasedTableOptions::kHashSearch: {
@@ -48,7 +49,7 @@ IndexBuilder* IndexBuilder::CreateIndexBuilder(
           comparator, int_key_slice_transform,
           table_opt.index_block_restart_interval, table_opt.format_version,
           use_value_delta_encoding, table_opt.index_shortening, ts_sz,
-          persist_user_defined_timestamps);
+          persist_user_defined_timestamps, table_opt.uniform_cv_threshold);
       break;
     }
     case BlockBasedTableOptions::kTwoLevelIndexSearch: {
@@ -62,11 +63,12 @@ IndexBuilder* IndexBuilder::CreateIndexBuilder(
           comparator, table_opt.index_block_restart_interval,
           table_opt.format_version, use_value_delta_encoding,
           table_opt.index_shortening, /* include_first_key */ true, ts_sz,
-          persist_user_defined_timestamps);
+          persist_user_defined_timestamps, statistics,
+          table_opt.uniform_cv_threshold);
       break;
     }
     default: {
-      assert(!"Do not recognize the index type ");
+      assert(false && "Do not recognize the index type ");
       break;
     }
   }
@@ -117,34 +119,50 @@ Slice ShortenedIndexBuilder::FindShortInternalKeySuccessor(
   }
 }
 
+void ShortenedIndexBuilder::UpdateIndexSizeEstimate() {
+  uint64_t current_size =
+      must_use_separator_with_seq_.LoadRelaxed()
+          ? index_block_builder_.CurrentSizeEstimate()
+          : index_block_builder_without_seq_.CurrentSizeEstimate();
+
+  uint64_t final_estimate = current_size;
+  if (num_index_entries_ > 0) {
+    // Add buffer to generously account (in most cases) for the next index entry
+    final_estimate += (2 * (current_size / num_index_entries_));
+  }
+  estimated_index_size_.StoreRelaxed(final_estimate);
+}
+
 PartitionedIndexBuilder* PartitionedIndexBuilder::CreateIndexBuilder(
     const InternalKeyComparator* comparator,
     const bool use_value_delta_encoding,
     const BlockBasedTableOptions& table_opt, size_t ts_sz,
-    const bool persist_user_defined_timestamps) {
-  return new PartitionedIndexBuilder(comparator, table_opt,
-                                     use_value_delta_encoding, ts_sz,
-                                     persist_user_defined_timestamps);
+    const bool persist_user_defined_timestamps, Statistics* statistics) {
+  return new PartitionedIndexBuilder(
+      comparator, table_opt, use_value_delta_encoding, ts_sz,
+      persist_user_defined_timestamps, statistics);
 }
 
 PartitionedIndexBuilder::PartitionedIndexBuilder(
     const InternalKeyComparator* comparator,
     const BlockBasedTableOptions& table_opt,
     const bool use_value_delta_encoding, size_t ts_sz,
-    const bool persist_user_defined_timestamps)
+    const bool persist_user_defined_timestamps, Statistics* statistics)
     : IndexBuilder(comparator, ts_sz, persist_user_defined_timestamps),
       index_block_builder_(
           table_opt.index_block_restart_interval, true /*use_delta_encoding*/,
           use_value_delta_encoding,
           BlockBasedTableOptions::kDataBlockBinarySearch /* index_type */,
           0.75 /* data_block_hash_table_util_ratio */, ts_sz,
-          persist_user_defined_timestamps, false /* is_user_key */),
+          persist_user_defined_timestamps, false /* is_user_key */,
+          /*use_separated_kv_storage=*/false),
       index_block_builder_without_seq_(
           table_opt.index_block_restart_interval, true /*use_delta_encoding*/,
           use_value_delta_encoding,
           BlockBasedTableOptions::kDataBlockBinarySearch /* index_type */,
           0.75 /* data_block_hash_table_util_ratio */, ts_sz,
-          persist_user_defined_timestamps, true /* is_user_key */),
+          persist_user_defined_timestamps, true /* is_user_key */,
+          /*use_separated_kv_storage=*/false),
       table_opt_(table_opt),
       // We start by false. After each partition we revise the value based on
       // what the sub_index_builder has decided. If the feature is disabled
@@ -153,7 +171,8 @@ PartitionedIndexBuilder::PartitionedIndexBuilder(
       // sub_index_builders could not safely exclude seq from the keys, then it
       // wil be enforced on all sub_index_builders on ::Finish.
       must_use_separator_with_seq_(false),
-      use_value_delta_encoding_(use_value_delta_encoding) {
+      use_value_delta_encoding_(use_value_delta_encoding),
+      statistics_(statistics) {
   MakeNewSubIndexBuilder();
 }
 
@@ -162,7 +181,8 @@ void PartitionedIndexBuilder::MakeNewSubIndexBuilder() {
       comparator_, table_opt_.index_block_restart_interval,
       table_opt_.format_version, use_value_delta_encoding_,
       table_opt_.index_shortening, /* include_first_key */ false, ts_sz_,
-      persist_user_defined_timestamps_);
+      persist_user_defined_timestamps_, statistics_,
+      table_opt_.uniform_cv_threshold);
   sub_index_builder_ = new_builder.get();
   // Start next partition entry, where we will modify the key
   entries_.push_back({{}, std::move(new_builder)});
@@ -172,8 +192,8 @@ void PartitionedIndexBuilder::MakeNewSubIndexBuilder() {
   // must_use_separator_with_seq_ is true (internal-key mode) (set to false by
   // default on Creation) so that flush policy can point to
   // sub_index_builder_->index_block_builder_
-  if (must_use_separator_with_seq_) {
-    sub_index_builder_->must_use_separator_with_seq_ = true;
+  if (must_use_separator_with_seq_.LoadRelaxed()) {
+    sub_index_builder_->must_use_separator_with_seq_.StoreRelaxed(true);
     builder_to_monitor = &sub_index_builder_->index_block_builder_;
   } else {
     builder_to_monitor = &sub_index_builder_->index_block_builder_without_seq_;
@@ -221,24 +241,37 @@ void PartitionedIndexBuilder::MaybeFlush(const Slice& index_key,
                        index_key, EncodedBlockHandle(index_value).AsSlice()));
   if (do_flush) {
     assert(entries_.back().value.get() == sub_index_builder_);
+
+    // Update estimate of completed partitions when a partition is flushed
+    estimated_completed_partitions_size_.FetchAddRelaxed(
+        sub_index_builder_->CurrentIndexSizeEstimate());
+
     cut_filter_block = true;
     MakeNewSubIndexBuilder();
   }
 }
 
 void PartitionedIndexBuilder::FinishIndexEntry(const BlockHandle& block_handle,
-                                               PreparedIndexEntry* base_entry) {
+                                               PreparedIndexEntry* base_entry,
+                                               bool skip_delta_encoding) {
   using SPIE = ShortenedIndexBuilder::ShortenedPreparedIndexEntry;
   SPIE* entry = static_cast<SPIE*>(base_entry);
 
   MaybeFlush(entry->separator_with_seq, block_handle);
 
-  sub_index_builder_->FinishIndexEntry(block_handle, base_entry);
+  sub_index_builder_->FinishIndexEntry(block_handle, base_entry,
+                                       skip_delta_encoding);
   std::swap(entries_.back().key, entry->separator_with_seq);
 
-  if (!must_use_separator_with_seq_ && entry->must_use_separator_with_seq) {
+  // Update cached size estimate when data blocks are finalized for more
+  // accurate tail size estimation. This is needed for parallel compression
+  // which uses FinishIndexEntry() instead of AddIndexEntry().
+  UpdateIndexSizeEstimate();
+
+  if (!must_use_separator_with_seq_.LoadRelaxed() &&
+      entry->must_use_separator_with_seq) {
     // We need to apply !must_use_separator_with_seq to all sub-index builders
-    must_use_separator_with_seq_ = true;
+    must_use_separator_with_seq_.StoreRelaxed(true);
     flush_policy_->Retarget(sub_index_builder_->index_block_builder_);
   }
   // NOTE: not compatible with coupled partitioned filters so don't need to
@@ -248,22 +281,27 @@ void PartitionedIndexBuilder::FinishIndexEntry(const BlockHandle& block_handle,
 Slice PartitionedIndexBuilder::AddIndexEntry(
     const Slice& last_key_in_current_block,
     const Slice* first_key_in_next_block, const BlockHandle& block_handle,
-    std::string* separator_scratch) {
+    std::string* separator_scratch, bool skip_delta_encoding) {
   // At least when running without parallel compression, maintain behavior of
   // avoiding a last index partition with just one entry
   if (first_key_in_next_block) {
     MaybeFlush(last_key_in_current_block, block_handle);
   }
 
-  auto sep = sub_index_builder_->AddIndexEntry(last_key_in_current_block,
-                                               first_key_in_next_block,
-                                               block_handle, separator_scratch);
+  auto sep = sub_index_builder_->AddIndexEntry(
+      last_key_in_current_block, first_key_in_next_block, block_handle,
+      separator_scratch, skip_delta_encoding);
   entries_.back().key.assign(sep.data(), sep.size());
 
-  if (!must_use_separator_with_seq_ &&
-      sub_index_builder_->must_use_separator_with_seq_) {
+  // Update cached size estimate when data blocks are finalized for more
+  // accurate tail size estimation. This ensures the estimate reflects current
+  // state after each data block is added.
+  UpdateIndexSizeEstimate();
+
+  if (!must_use_separator_with_seq_.LoadRelaxed() &&
+      sub_index_builder_->must_use_separator_with_seq_.LoadRelaxed()) {
     // We need to apply !must_use_separator_with_seq to all sub-index builders
-    must_use_separator_with_seq_ = true;
+    must_use_separator_with_seq_.StoreRelaxed(true);
     flush_policy_->Retarget(sub_index_builder_->index_block_builder_);
   }
   if (UNLIKELY(first_key_in_next_block == nullptr)) {
@@ -297,7 +335,7 @@ Status PartitionedIndexBuilder::Finish(
     const Slice handle_delta_encoding_slice(handle_delta_encoding);
     index_block_builder_.Add(last_entry.key, handle_encoding.AsSlice(),
                              &handle_delta_encoding_slice);
-    if (!must_use_separator_with_seq_) {
+    if (!must_use_separator_with_seq_.LoadRelaxed()) {
       index_block_builder_without_seq_.Add(ExtractUserKey(last_entry.key),
                                            handle_encoding.AsSlice(),
                                            &handle_delta_encoding_slice);
@@ -306,7 +344,7 @@ Status PartitionedIndexBuilder::Finish(
   }
   // If there is no sub_index left, then return the 2nd level index.
   if (UNLIKELY(entries_.empty())) {
-    if (must_use_separator_with_seq_) {
+    if (must_use_separator_with_seq_.LoadRelaxed()) {
       index_blocks->index_block_contents = index_block_builder_.Finish();
     } else {
       index_blocks->index_block_contents =
@@ -320,7 +358,8 @@ Status PartitionedIndexBuilder::Finish(
     // expect more calls to Finish
     Entry& entry = entries_.front();
     // Apply the policy to all sub-indexes
-    entry.value->must_use_separator_with_seq_ = must_use_separator_with_seq_;
+    entry.value->must_use_separator_with_seq_.StoreRelaxed(
+        must_use_separator_with_seq_.LoadRelaxed());
     auto s = entry.value->Finish(index_blocks);
     index_size_ += index_blocks->index_block_contents.size();
     finishing_indexes_ = true;
@@ -329,4 +368,49 @@ Status PartitionedIndexBuilder::Finish(
 }
 
 size_t PartitionedIndexBuilder::NumPartitions() const { return partition_cnt_; }
+
+void PartitionedIndexBuilder::UpdateIndexSizeEstimate() {
+  uint64_t total_size = 0;
+
+  // Ignore last entry which is a placeholder for the partition being built
+  size_t completed_partitions = entries_.size() > 0 ? entries_.size() - 1 : 0;
+
+  // Use running estimate of completed partitions instead of IndexSize() which
+  // is only available after calling Finish().
+  uint64_t completed_partitions_size =
+      estimated_completed_partitions_size_.LoadRelaxed();
+  total_size += completed_partitions_size;
+
+  // Add current active partition size if it exists
+  uint64_t current_sub_index_size = 0;
+  if (sub_index_builder_ != nullptr) {
+    current_sub_index_size = sub_index_builder_->CurrentIndexSizeEstimate();
+    total_size += current_sub_index_size;
+  }
+
+  // Add buffer for top-level index and next partition
+  uint64_t buffer_size = 0;
+  if (completed_partitions > 0) {
+    // Calculate top-level index size. Each top-level entry consists of:
+    // separator key (~20-50 bytes) + BlockHandle (~20 bytes) + overhead
+    // Estimate ~70 bytes per top-level entry as a reasonable average
+    auto estimated_top_level_size = completed_partitions * 70;
+    total_size += completed_partitions * 70;
+
+    // Buffer for next partition + next top-level entry
+    uint64_t avg_partition_size =
+        completed_partitions_size / completed_partitions;
+    uint64_t avg_top_level_entry_size =
+        estimated_top_level_size / completed_partitions;
+
+    buffer_size = 2 * (avg_partition_size + avg_top_level_entry_size);
+    total_size += buffer_size;
+  } else if (sub_index_builder_ != nullptr) {
+    // For the first partition, estimate using the current partition's state
+    buffer_size = 2 * current_sub_index_size;
+    total_size += buffer_size;
+  }
+  estimated_index_size_.StoreRelaxed(total_size);
+}
+
 }  // namespace ROCKSDB_NAMESPACE

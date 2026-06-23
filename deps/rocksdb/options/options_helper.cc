@@ -65,6 +65,7 @@ void BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
       immutable_db_options.create_missing_column_families;
   options.error_if_exists = immutable_db_options.error_if_exists;
   options.paranoid_checks = immutable_db_options.paranoid_checks;
+  options.open_files_async = immutable_db_options.open_files_async;
   options.flush_verify_memtable_count =
       immutable_db_options.flush_verify_memtable_count;
   options.compaction_verify_record_count =
@@ -99,13 +100,15 @@ void BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.log_file_time_to_roll = immutable_db_options.log_file_time_to_roll;
   options.keep_log_file_num = immutable_db_options.keep_log_file_num;
   options.recycle_log_file_num = immutable_db_options.recycle_log_file_num;
-  options.max_manifest_file_size = immutable_db_options.max_manifest_file_size;
+  options.max_manifest_file_size = mutable_db_options.max_manifest_file_size;
+  options.max_manifest_space_amp_pct =
+      mutable_db_options.max_manifest_space_amp_pct;
   options.table_cache_numshardbits =
       immutable_db_options.table_cache_numshardbits;
   options.WAL_ttl_seconds = immutable_db_options.WAL_ttl_seconds;
   options.WAL_size_limit_MB = immutable_db_options.WAL_size_limit_MB;
   options.manifest_preallocation_size =
-      immutable_db_options.manifest_preallocation_size;
+      mutable_db_options.manifest_preallocation_size;
   options.allow_mmap_reads = immutable_db_options.allow_mmap_reads;
   options.allow_mmap_writes = immutable_db_options.allow_mmap_writes;
   options.use_direct_reads = immutable_db_options.use_direct_reads;
@@ -147,8 +150,6 @@ void BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
       immutable_db_options.write_thread_slow_yield_usec;
   options.skip_stats_update_on_db_open =
       immutable_db_options.skip_stats_update_on_db_open;
-  options.skip_checking_sst_file_sizes_on_db_open =
-      immutable_db_options.skip_checking_sst_file_sizes_on_db_open;
   options.wal_recovery_mode = immutable_db_options.wal_recovery_mode;
   options.allow_2pc = immutable_db_options.allow_2pc;
   options.row_cache = immutable_db_options.row_cache;
@@ -156,6 +157,8 @@ void BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.dump_malloc_stats = immutable_db_options.dump_malloc_stats;
   options.avoid_flush_during_recovery =
       immutable_db_options.avoid_flush_during_recovery;
+  options.enforce_write_buffer_manager_during_recovery =
+      immutable_db_options.enforce_write_buffer_manager_during_recovery;
   options.avoid_flush_during_shutdown =
       mutable_db_options.avoid_flush_during_shutdown;
   options.allow_ingest_behind = immutable_db_options.allow_ingest_behind;
@@ -186,6 +189,8 @@ void BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.lowest_used_cache_tier = immutable_db_options.lowest_used_cache_tier;
   options.enforce_single_del_contracts =
       immutable_db_options.enforce_single_del_contracts;
+  options.verify_manifest_content_on_close =
+      mutable_db_options.verify_manifest_content_on_close;
   options.daily_offpeak_time_utc = mutable_db_options.daily_offpeak_time_utc;
   options.follower_refresh_catchup_period_ms =
       immutable_db_options.follower_refresh_catchup_period_ms;
@@ -252,6 +257,8 @@ void UpdateColumnFamilyOptions(const MutableCFOptions& moptions,
   cf_opts->max_compaction_bytes = moptions.max_compaction_bytes;
   cf_opts->target_file_size_base = moptions.target_file_size_base;
   cf_opts->target_file_size_multiplier = moptions.target_file_size_multiplier;
+  cf_opts->target_file_size_is_upper_bound =
+      moptions.target_file_size_is_upper_bound;
   cf_opts->max_bytes_for_level_base = moptions.max_bytes_for_level_base;
   cf_opts->max_bytes_for_level_multiplier =
       moptions.max_bytes_for_level_multiplier;
@@ -269,6 +276,8 @@ void UpdateColumnFamilyOptions(const MutableCFOptions& moptions,
 
   cf_opts->compaction_options_fifo = moptions.compaction_options_fifo;
   cf_opts->compaction_options_universal = moptions.compaction_options_universal;
+
+  cf_opts->verify_output_flags = moptions.verify_output_flags;
 
   // Blob file related options
   cf_opts->enable_blob_files = moptions.enable_blob_files;
@@ -342,6 +351,8 @@ void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,
       ioptions.persist_user_defined_timestamps;
   cf_opts->default_temperature = ioptions.default_temperature;
   cf_opts->cf_allow_ingest_behind = ioptions.cf_allow_ingest_behind;
+  cf_opts->memtable_batch_lookup_optimization =
+      ioptions.memtable_batch_lookup_optimization;
 
   // TODO(yhchiang): find some way to handle the following derived options
   // * max_file_size

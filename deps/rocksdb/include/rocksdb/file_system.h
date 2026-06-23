@@ -90,6 +90,7 @@ enum FSSupportedOps {
   kVerifyAndReconstructRead,  // Supports a higher level of data integrity. See
                               // the verify_and_reconstruct_read flag in
                               // IOOptions.
+  kFSPrefetch,                // Supports prefetch operations
 };
 
 // Per-request options that can be passed down to the FileSystem
@@ -200,6 +201,19 @@ struct FileOptions : EnvOptions {
   // FSWritableFile object creation.
   Env::WriteLifeTimeHint write_hint = Env::WLTH_NOT_SET;
 
+  // File checksum of the file being opened. Empty string if no checksum is
+  // available.
+  std::string file_checksum;
+
+  // Name of the checksum function used to compute file_checksum. Set to
+  // kUnknownFileChecksumFuncName when file was created without a checksum
+  // factory. Set to kNoFileChecksumFuncName when no checksum metadata is
+  // available.
+  // Production FileSystems will accept empty values for both
+  // file_checksum and file_checksum_func_name, but internally within RocksDB
+  // that is forbidden for checking/auditing purposes.
+  std::string file_checksum_func_name;
+
   FileOptions() : EnvOptions(), handoff_checksum_type(ChecksumType::kCRC32c) {}
 
   FileOptions(const DBOptions& opts)
@@ -215,7 +229,9 @@ struct FileOptions : EnvOptions {
         io_options(opts.io_options),
         temperature(opts.temperature),
         handoff_checksum_type(opts.handoff_checksum_type),
-        write_hint(opts.write_hint) {}
+        write_hint(opts.write_hint),
+        file_checksum(opts.file_checksum),
+        file_checksum_func_name(opts.file_checksum_func_name) {}
 
   FileOptions& operator=(const FileOptions&) = default;
 };
@@ -557,7 +573,7 @@ class FileSystem : public Customizable {
   }
 
 // This seems to clash with a macro on Windows, so #undef it here
-#ifdef DeleteFile
+#ifdef DeleteFile  // ODR-SAFE
 #undef DeleteFile
 #endif
   // Delete the named file.
@@ -718,7 +734,7 @@ class FileSystem : public Customizable {
       const ImmutableDBOptions& db_options) const;
 
 // This seems to clash with a macro on Windows, so #undef it here
-#ifdef GetFreeSpace
+#ifdef GetFreeSpace  // ODR-SAFE
 #undef GetFreeSpace
 #endif
 
@@ -749,7 +765,7 @@ class FileSystem : public Customizable {
   // Abort the read IO requests submitted asynchronously. Underlying FS is
   // required to support AbortIO API. AbortIO implementation should ensure that
   // the all the read requests related to io_handles should be aborted and
-  // it shouldn't call the callback for these io_handles.
+  // it should call the callback for these io_handles.
   virtual IOStatus AbortIO(std::vector<void*>& /*io_handles*/) {
     return IOStatus::OK();
   }
@@ -771,12 +787,13 @@ class FileSystem : public Customizable {
   //  If async_io is supported by the underlying FileSystem, then supported_ops
   //  will have corresponding bit (i.e FSSupportedOps::kAsyncIO) set to 1.
   //
-  // By default, async_io operation is set and FS should override this API and
-  // set all the operations they support provided in FSSupportedOps (including
-  // async_io).
+  // By default, async_io and prefetch operation are set and FS should override
+  // this API and set all the operations they support provided in FSSupportedOps
+  // (including async_io and prefetch).
   virtual void SupportedOps(int64_t& supported_ops) {
     supported_ops = 0;
     supported_ops |= (1 << FSSupportedOps::kAsyncIO);
+    supported_ops |= (1 << FSSupportedOps::kFSPrefetch);
   }
 
   // If you're adding methods here, remember to add them to EnvWrapper too.
@@ -1164,8 +1181,10 @@ class FSWritableFile {
 
   // Truncate is necessary to trim the file to the correct size
   // before closing. It is not always possible to keep track of the file
-  // size due to whole pages writes. The behavior is undefined if called
-  // with other writes to follow.
+  // size due to whole pages writes. If called with other writes to follow,
+  // the behavior is file system specific. Posix will reseek to the new EOF.
+  // Other file systems may behave differently. Its the caller's
+  // responsibility to check the file system contract.
   virtual IOStatus Truncate(uint64_t /*size*/, const IOOptions& /*options*/,
                             IODebugContext* /*dbg*/) {
     return IOStatus::OK();

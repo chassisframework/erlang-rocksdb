@@ -200,7 +200,8 @@ class VersionStorageInfo {
   // REQUIRES: db_mutex held!!
   // TODO find a better way to pass compaction_options_fifo.
   void ComputeCompactionScore(const ImmutableOptions& immutable_options,
-                              const MutableCFOptions& mutable_cf_options);
+                              const MutableCFOptions& mutable_cf_options,
+                              const std::string& full_history_ts_low);
 
   // Estimate est_comp_needed_bytes_
   void EstimateCompactionBytesNeeded(
@@ -230,8 +231,15 @@ class VersionStorageInfo {
   // oldest snapshot changes as that is when bottom-level files can become
   // eligible for compaction.
   //
+  // For columns with User Defined Timestamps (UDT), also checks that the
+  // file's largest timestamp is below full_history_ts_low before marking,
+  // since compaction can only collapse timestamp when it is below this
+  // threshold.
+  //
   // REQUIRES: DB mutex held
-  void ComputeBottommostFilesMarkedForCompaction(bool allow_ingest_behind);
+  void ComputeBottommostFilesMarkedForCompaction(
+      bool allow_ingest_behind, const Comparator* ucmp,
+      const std::string& full_history_ts_low);
 
   // This computes files_marked_for_forced_blob_gc_ and is called by
   // ComputeCompactionScore()
@@ -248,7 +256,8 @@ class VersionStorageInfo {
   // files marked for compaction.
   // REQUIRES: DB mutex held
   void UpdateOldestSnapshot(SequenceNumber oldest_snapshot_seqnum,
-                            bool allow_ingest_behind);
+                            bool allow_ingest_behind, const Comparator* ucmp,
+                            const std::string& full_history_ts_low);
 
   int MaxInputLevel() const;
   int MaxOutputLevel(bool allow_ingest_behind) const;
@@ -268,8 +277,13 @@ class VersionStorageInfo {
       bool expand_range = true,   // if set, returns files which overlap the
                                   // range and overlap each other. If false,
                                   // then just files intersecting the range
-      InternalKey** next_smallest = nullptr)  // if non-null, returns the
-      const;  // smallest key of next file not included
+      const FileMetaData* starting_l0_file =
+          nullptr,  // If not null, restricts L0 file selection to only include
+                    // files at or older than starting_l0_file.
+      InternalKey** next_smallest =
+          nullptr  // if non-null, returns the
+                   // smallest key of next file not included
+  ) const;
   void GetCleanInputsWithinInterval(
       int level, const InternalKey* begin,  // nullptr means before all keys
       const InternalKey* end,               // nullptr means after all keys
@@ -286,8 +300,10 @@ class VersionStorageInfo {
       int hint_index,                // index of overlap file
       int* file_index,               // return index of overlap file
       bool within_interval = false,  // if set, force the inputs within interval
-      InternalKey** next_smallest = nullptr)  // if non-null, returns the
-      const;  // smallest key of next file not included
+      InternalKey** next_smallest =
+          nullptr  // if non-null, returns the
+                   // smallest key of next file not included
+  ) const;
 
   // Returns true iff some file in the specified level overlaps
   // some part of [*smallest_user_key,*largest_user_key].
@@ -1044,6 +1060,10 @@ class Version {
 
   void GetColumnFamilyMetaData(ColumnFamilyMetaData* cf_meta);
 
+  // Get column family metadata with optional filtering by key range and level.
+  void GetColumnFamilyMetaData(const GetColumnFamilyMetaDataOptions& options,
+                               ColumnFamilyMetaData* cf_meta);
+
   void GetSstFilesBoundaryKeys(Slice* smallest_user_key,
                                Slice* largest_user_key);
 
@@ -1186,7 +1206,9 @@ class AtomicGroupReadBuffer {
 // but false for secondary instance or writable DB).
 class VersionSet {
  public:
-  VersionSet(const std::string& dbname, const ImmutableDBOptions* db_options,
+  VersionSet(const std::string& dbname,
+             const ImmutableDBOptions* imm_db_options,
+             const MutableDBOptions& mutable_db_options,
              const FileOptions& file_options, Cache* table_cache,
              WriteBufferManager* write_buffer_manager,
              WriteController* write_controller,
@@ -1202,6 +1224,13 @@ class VersionSet {
   virtual ~VersionSet();
 
   virtual Status Close(FSDirectory* db_dir, InstrumentedMutex* mu);
+
+  // Requires: already holding DB mutex `mu`, to ensure
+  // * Safely read values from `updated_options`
+  // * Safely update fields on `this` (must be read elsewhere while holding mu)
+  // except `mu` can be nullptr during initialization
+  void UpdatedMutableDbOptions(const MutableDBOptions& updated_options,
+                               InstrumentedMutex* mu);
 
   Status LogAndApplyToDefaultColumnFamily(
       const ReadOptions& read_options, const WriteOptions& write_options,
@@ -1405,6 +1434,29 @@ class VersionSet {
     return last_allocated_sequence_.fetch_add(s, std::memory_order_seq_cst);
   }
 
+  // Sync last_sequence_ with last_allocated_sequence_. This should be called
+  // during error recovery to ensure that any sequence numbers that were
+  // allocated (written to WAL) but not yet published are accounted for when
+  // creating new memtables/WALs. This prevents the "sequence number going
+  // backwards" corruption on subsequent recovery.
+  //
+  // This is necessary because with two_write_queues=true, writes allocate
+  // sequence numbers via FetchAddLastAllocatedSequence() before the write
+  // is complete, but only publish via SetLastSequence() after success.
+  // If an error occurs and recovery creates new memtables, SwitchMemtable
+  // uses LastSequence() which may be lower than already-allocated sequences.
+  //
+  // REQUIRED: DB mutex is held and no concurrent writers are active (i.e.,
+  // after WaitForBackgroundWork() in ResumeImpl).
+  void SyncLastSequenceWithAllocated() {
+    uint64_t alloc_seq =
+        last_allocated_sequence_.load(std::memory_order_seq_cst);
+    uint64_t last_seq = last_sequence_.load(std::memory_order_acquire);
+    if (alloc_seq > last_seq) {
+      last_sequence_.store(alloc_seq, std::memory_order_release);
+    }
+  }
+
   // Mark the specified file number as used.
   // REQUIRED: this is only called during single-threaded recovery or repair.
   void MarkFileNumberUsed(uint64_t number);
@@ -1548,10 +1600,6 @@ class VersionSet {
   }
 
   const FileOptions& file_options() { return file_options_; }
-  void ChangeFileOptions(const MutableDBOptions& new_options) {
-    file_options_.writable_file_max_buffer_size =
-        new_options.writable_file_max_buffer_size;
-  }
 
   // TODO - Consider updating together when file options change in SetDBOptions
   const OffpeakTimeOption& offpeak_time_option() {
@@ -1590,6 +1638,16 @@ class VersionSet {
 
   bool& TEST_unchanging() { return const_cast<bool&>(unchanging_); }
 
+  uint64_t TEST_GetMinMaxManifestFileSize() {
+    return min_max_manifest_file_size_;
+  }
+  unsigned TEST_GetMaxManifestSpaceAmpPct() {
+    return max_manifest_space_amp_pct_;
+  }
+  size_t TEST_GetManifestPreallocationSize() {
+    return manifest_preallocation_size_;
+  }
+
  protected:
   struct ManifestWriter;
 
@@ -1610,6 +1668,7 @@ class VersionSet {
     }
   };
 
+  // Revert back to a post-construction state (keep same options/settings)
   void Reset();
 
   // Returns approximated offset of a key in a file for a given version.
@@ -1648,6 +1707,11 @@ class VersionSet {
                             ColumnFamilyData* cfd, const std::string& fpath,
                             int level, const FileMetaData& meta);
 
+  // Auto-tune next max size for the current manifest file based on its initial
+  // "compacted" size and other parameters saved in this VersionSet. Must be
+  // holding DB mutex if outside of DB startup.
+  void TuneMaxManifestFileSize();
+
   // Protected by DB mutex.
   WalSet wals_;
 
@@ -1674,6 +1738,9 @@ class VersionSet {
   // The last sequence number of data committed to the descriptor (manifest
   // file).
   SequenceNumber descriptor_last_sequence_ = 0;
+  // See write_prepared_txn.h for a more detailed description of how Write
+  // Prepared transactions work, with concrete examples.
+  //
   // The last seq that is already allocated. It is applicable only when we have
   // two write queues. In that case seq might or might not have appreated in
   // memtable but it is expected to appear in the WAL.
@@ -1698,6 +1765,22 @@ class VersionSet {
 
   // Current size of manifest file
   uint64_t manifest_file_size_;
+
+  // Size of the populated manifest file last time it was re-written from
+  // scratch.
+  uint64_t last_compacted_manifest_file_size_;
+
+  // Auto-tuned max allowed size for the current manifest file
+  uint64_t tuned_max_manifest_file_size_;
+
+  // Saved copy of max_manifest_file_size in (Mutable)DBOptions
+  uint64_t min_max_manifest_file_size_;
+  // Saved, sanitized copy from (Mutable)DBOptions
+  unsigned max_manifest_space_amp_pct_;
+  // Saved copy from (Mutable)DBOptions
+  size_t manifest_preallocation_size_;
+  // Saved copy from (Mutable)DBOptions
+  bool verify_manifest_content_on_close_;
 
   // Obsolete files, or during DB shutdown any files not referenced by what's
   // left of the in-memory LSM state.
@@ -1751,6 +1834,7 @@ class ReactiveVersionSet : public VersionSet {
  public:
   ReactiveVersionSet(const std::string& dbname,
                      const ImmutableDBOptions* _db_options,
+                     const MutableDBOptions& mutable_db_options,
                      const FileOptions& _file_options, Cache* table_cache,
                      WriteBufferManager* write_buffer_manager,
                      WriteController* write_controller,

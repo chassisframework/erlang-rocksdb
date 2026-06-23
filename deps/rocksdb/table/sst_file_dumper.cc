@@ -23,6 +23,7 @@
 #include "port/port.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
+#include "rocksdb/file_checksum.h"
 #include "rocksdb/iterator.h"
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/status.h"
@@ -47,12 +48,13 @@ SstFileDumper::SstFileDumper(const Options& options,
                              Temperature file_temp, size_t readahead_size,
                              bool verify_checksum, bool output_hex,
                              bool decode_blob_index, const EnvOptions& soptions,
-                             bool silent)
+                             bool silent, bool show_sequence_number_type)
     : file_name_(file_path),
       read_num_(0),
       file_temp_(file_temp),
       output_hex_(output_hex),
       decode_blob_index_(decode_blob_index),
+      show_sequence_number_type_(show_sequence_number_type),
       soptions_(soptions),
       silent_(silent),
       options_(options),
@@ -84,6 +86,7 @@ Status SstFileDumper::GetTableReader(const std::string& file_path) {
   uint64_t file_size = 0;
   FileOptions fopts = soptions_;
   fopts.temperature = file_temp_;
+  fopts.file_checksum_func_name = kNoFileChecksumFuncName;
   Status s = fs->NewRandomAccessFile(file_path, fopts, &file, nullptr);
   if (s.ok()) {
     // check empty file
@@ -128,18 +131,18 @@ Status SstFileDumper::GetTableReader(const std::string& file_path) {
       if (magic_number == kCuckooTableMagicNumber) {
         fopts = soptions_;
         fopts.temperature = file_temp_;
+        fopts.file_checksum_func_name = kNoFileChecksumFuncName;
       }
 
       fs->NewRandomAccessFile(file_path, fopts, &file, nullptr);
       file_.reset(new RandomAccessFileReader(std::move(file), file_path));
     }
 
-    // For old sst format, ReadTableProperties might fail but file can be read
-    if (ReadTableProperties(magic_number, file_.get(), file_size,
+    s = ReadTableProperties(magic_number, file_.get(), file_size,
                             (magic_number == kBlockBasedTableMagicNumber)
                                 ? &prefetch_buffer
-                                : nullptr)
-            .ok()) {
+                                : nullptr);
+    if (s.ok()) {
       s = SetTableOptionsByMagicNumber(magic_number);
       if (s.ok()) {
         if (table_properties_ && !table_properties_->comparator_name.empty()) {
@@ -154,8 +157,6 @@ Status SstFileDumper::GetTableReader(const std::string& file_path) {
           }
         }
       }
-    } else {
-      s = SetOldTableOptions();
     }
     options_.comparator = internal_comparator_.user_comparator();
 
@@ -220,7 +221,7 @@ Status SstFileDumper::DumpTable(const std::string& out_filename) {
   Env* env = options_.env;
   Status s = env->NewWritableFile(out_filename, &out_file, soptions_);
   if (s.ok()) {
-    s = table_reader_->DumpTable(out_file.get());
+    s = table_reader_->DumpTable(out_file.get(), show_sequence_number_type_);
   }
   if (!s.ok()) {
     // close the file before return error, ignore the close error if there's any
@@ -457,8 +458,7 @@ Status SstFileDumper::ReadTableProperties(uint64_t table_magic_number,
 Status SstFileDumper::SetTableOptionsByMagicNumber(
     uint64_t table_magic_number) {
   assert(table_properties_);
-  if (table_magic_number == kBlockBasedTableMagicNumber ||
-      table_magic_number == kLegacyBlockBasedTableMagicNumber) {
+  if (table_magic_number == kBlockBasedTableMagicNumber) {
     // Preserve BlockBasedTableOptions on options_ when possible
     if (!options_.table_factory->IsInstanceOf(
             TableFactory::kBlockBasedTableName())) {
@@ -518,19 +518,6 @@ Status SstFileDumper::SetTableOptionsByMagicNumber(
              "Unsupported table magic number --- %lx",
              (long)table_magic_number);
     return Status::InvalidArgument(error_msg_buffer);
-  }
-
-  return Status::OK();
-}
-
-Status SstFileDumper::SetOldTableOptions() {
-  assert(table_properties_ == nullptr);
-  if (!options_.table_factory->IsInstanceOf(
-          TableFactory::kBlockBasedTableName())) {
-    options_.table_factory = std::make_shared<BlockBasedTableFactory>();
-  }
-  if (!silent_) {
-    fprintf(stdout, "Sst file format: block-based(old version)\n");
   }
 
   return Status::OK();

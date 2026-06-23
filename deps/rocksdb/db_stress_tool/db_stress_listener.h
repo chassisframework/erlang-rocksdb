@@ -9,6 +9,7 @@
 #include <mutex>
 #include <unordered_set>
 
+#include "db_stress_tool/db_stress_compaction_service.h"
 #include "db_stress_tool/db_stress_shared_state.h"
 #include "file/filename.h"
 #include "file/writable_file_writer.h"
@@ -21,7 +22,6 @@
 #include "util/gflags_compat.h"
 #include "util/random.h"
 #include "utilities/fault_injection_fs.h"
-
 DECLARE_int32(compact_files_one_in);
 
 extern std::shared_ptr<ROCKSDB_NAMESPACE::FaultInjectionTestFS> fault_fs_guard;
@@ -226,6 +226,13 @@ class DbStressListener : public EventListener {
     RandomSleep();
   }
 
+  void OnBackgroundJobPressureChanged(
+      DB* /*db*/, const BackgroundJobPressure& pressure) override {
+    RandomSleep();
+    std::lock_guard<std::mutex> lk(bg_pressure_mu_);
+    last_bg_pressure_ = pressure;
+  }
+
   void OnFileReadFinish(const FileOperationInfo& info) override {
     // Even empty callback is valuable because sometimes some locks are
     // released in order to make the callback.
@@ -310,6 +317,11 @@ class DbStressListener : public EventListener {
         }
       }
     }
+    // We can't do exact matching since remote workers use dynamic temp paths
+    if (file_dir.find(DbStressCompactionService::kTempOutputDirectoryPrefix) !=
+        std::string::npos) {
+      return;
+    }
     assert(false);
 #else
     (void)file_dir;
@@ -361,6 +373,8 @@ class DbStressListener : public EventListener {
   std::atomic<int> num_pending_file_creations_;
   UniqueIdVerifier unique_ids_;
   SharedState* shared_;
+  mutable std::mutex bg_pressure_mu_;
+  BackgroundJobPressure last_bg_pressure_;
 };
 }  // namespace ROCKSDB_NAMESPACE
 #endif  // GFLAGS

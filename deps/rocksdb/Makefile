@@ -296,6 +296,28 @@ $(info $(shell $(CC) --version))
 $(info $(shell $(CXX) --version))
 endif
 
+# ccache support
+# Set USE_CCACHE=1 to enable ccache, or let it auto-detect
+ifndef USE_CCACHE
+  CCACHE := $(shell which ccache 2>/dev/null)
+  ifneq ($(CCACHE),)
+    USE_CCACHE := 1
+  else
+    USE_CCACHE := 0
+  endif
+endif
+
+ifeq ($(USE_CCACHE), 1)
+  CCACHE := $(shell which ccache 2>/dev/null)
+  ifneq ($(CCACHE),)
+    $(info Using ccache: $(CCACHE))
+    CC := $(CCACHE) $(CC)
+    CXX := $(CCACHE) $(CXX)
+  else
+    $(warning ccache requested but not found in PATH)
+  endif
+endif
+
 missing_make_config_paths := $(shell				\
 	grep "\./\S*\|/\S*" -o $(CURDIR)/make_config.mk | 	\
 	while read path;					\
@@ -368,8 +390,6 @@ ifdef COMPILE_WITH_TSAN
         # Turn off -pg when enabling TSAN testing, because that induces
         # a link failure.  TODO: find the root cause
 	PROFILING_FLAGS =
-	# LUA is not supported under TSAN
-	LUA_PATH =
 	# Limit keys for crash test under TSAN to avoid error:
 	# "ThreadSanitizer: DenseSlabAllocator overflow. Dying."
 	CRASH_TEST_EXT_ARGS += --max_key=1000000
@@ -446,83 +466,7 @@ else
 	PLATFORM_CXXFLAGS += -isystem $(GTEST_DIR)
 endif
 
-# This provides a Makefile simulation of a Meta-internal folly integration.
-# It is not validated for general use.
-#
-# USE_FOLLY links the build targets with libfolly.a. The latter could be
-# built using 'make build_folly', or built externally and specified in
-# the CXXFLAGS and EXTRA_LDFLAGS env variables. The build_detect_platform
-# script tries to detect if an external folly dependency has been specified.
-# If not, it exports FOLLY_PATH to the path of the installed Folly and
-# dependency libraries.
-#
-# USE_FOLLY_LITE cherry picks source files from Folly to include in the
-# RocksDB library. Its faster and has fewer dependencies on 3rd party
-# libraries, but with limited functionality. For example, coroutine
-# functionality is not available.
-ifeq ($(USE_FOLLY),1)
-ifeq ($(USE_FOLLY_LITE),1)
-$(error Please specify only one of USE_FOLLY and USE_FOLLY_LITE)
-endif
-ifneq ($(strip $(FOLLY_PATH)),)
-	BOOST_PATH = $(shell (ls -d $(FOLLY_PATH)/../boost*))
-	DBL_CONV_PATH = $(shell (ls -d $(FOLLY_PATH)/../double-conversion*))
-	GFLAGS_PATH = $(shell (ls -d $(FOLLY_PATH)/../gflags*))
-	GLOG_PATH = $(shell (ls -d $(FOLLY_PATH)/../glog*))
-	LIBEVENT_PATH = $(shell (ls -d $(FOLLY_PATH)/../libevent*))
-	XZ_PATH = $(shell (ls -d $(FOLLY_PATH)/../xz*))
-	LIBSODIUM_PATH = $(shell (ls -d $(FOLLY_PATH)/../libsodium*))
-	FMT_PATH = $(shell (ls -d $(FOLLY_PATH)/../fmt*))
-
-	# For some reason, glog and fmt libraries are under either lib or lib64
-	GLOG_LIB_PATH = $(shell (ls -d $(GLOG_PATH)/lib*))
-	FMT_LIB_PATH = $(shell (ls -d $(FMT_PATH)/lib*))
-
-	# AIX: pre-defined system headers are surrounded by an extern "C" block
-	ifeq ($(PLATFORM), OS_AIX)
-		PLATFORM_CCFLAGS += -I$(BOOST_PATH)/include -I$(DBL_CONV_PATH)/include -I$(GLOG_PATH)/include -I$(LIBEVENT_PATH)/include -I$(XZ_PATH)/include -I$(LIBSODIUM_PATH)/include -I$(FOLLY_PATH)/include -I$(FMT_PATH)/include
-		PLATFORM_CXXFLAGS += -I$(BOOST_PATH)/include -I$(DBL_CONV_PATH)/include -I$(GLOG_PATH)/include -I$(LIBEVENT_PATH)/include -I$(XZ_PATH)/include -I$(LIBSODIUM_PATH)/include -I$(FOLLY_PATH)/include -I$(FMT_PATH)/include
-	else
-		PLATFORM_CCFLAGS += -isystem $(BOOST_PATH)/include -isystem $(DBL_CONV_PATH)/include -isystem $(GLOG_PATH)/include -isystem $(LIBEVENT_PATH)/include -isystem $(XZ_PATH)/include -isystem $(LIBSODIUM_PATH)/include -isystem $(FOLLY_PATH)/include -isystem $(FMT_PATH)/include
-		PLATFORM_CXXFLAGS += -isystem $(BOOST_PATH)/include -isystem $(DBL_CONV_PATH)/include -isystem $(GLOG_PATH)/include -isystem $(LIBEVENT_PATH)/include -isystem $(XZ_PATH)/include -isystem $(LIBSODIUM_PATH)/include -isystem $(FOLLY_PATH)/include -isystem $(FMT_PATH)/include
-	endif
-
-	# Add -ldl at the end as gcc resolves a symbol in a library by searching only in libraries specified later
-	# in the command line
-	PLATFORM_LDFLAGS += $(FOLLY_PATH)/lib/libfolly.a $(BOOST_PATH)/lib/libboost_context.a $(BOOST_PATH)/lib/libboost_filesystem.a $(BOOST_PATH)/lib/libboost_atomic.a $(BOOST_PATH)/lib/libboost_program_options.a $(BOOST_PATH)/lib/libboost_regex.a $(BOOST_PATH)/lib/libboost_system.a $(BOOST_PATH)/lib/libboost_thread.a $(DBL_CONV_PATH)/lib/libdouble-conversion.a $(FMT_LIB_PATH)/libfmt.a $(GLOG_LIB_PATH)/libglog.so $(GFLAGS_PATH)/lib/libgflags.so.2.2 $(LIBEVENT_PATH)/lib/libevent-2.1.so -ldl
-	PLATFORM_LDFLAGS += -Wl,-rpath=$(GFLAGS_PATH)/lib -Wl,-rpath=$(GLOG_LIB_PATH) -Wl,-rpath=$(LIBEVENT_PATH)/lib -Wl,-rpath=$(LIBSODIUM_PATH)/lib -Wl,-rpath=$(LIBEVENT_PATH)/lib
-endif
-	PLATFORM_CCFLAGS += -DUSE_FOLLY -DFOLLY_NO_CONFIG
-	PLATFORM_CXXFLAGS += -DUSE_FOLLY -DFOLLY_NO_CONFIG
-endif
-
-ifeq ($(USE_FOLLY_LITE),1)
-	# Path to the Folly source code and include files
-	FOLLY_DIR = ./third-party/folly
-ifneq ($(strip $(BOOST_SOURCE_PATH)),)
-	BOOST_INCLUDE = $(shell (ls -d $(BOOST_SOURCE_PATH)/boost*/))
-	# AIX: pre-defined system headers are surrounded by an extern "C" block
-	ifeq ($(PLATFORM), OS_AIX)
-		PLATFORM_CCFLAGS += -I$(BOOST_INCLUDE)
-		PLATFORM_CXXFLAGS += -I$(BOOST_INCLUDE)
-	else
-		PLATFORM_CCFLAGS += -isystem $(BOOST_INCLUDE)
-		PLATFORM_CXXFLAGS += -isystem $(BOOST_INCLUDE)
-	endif
-endif  # BOOST_SOURCE_PATH
-	# AIX: pre-defined system headers are surrounded by an extern "C" block
-	ifeq ($(PLATFORM), OS_AIX)
-		PLATFORM_CCFLAGS += -I$(FOLLY_DIR)
-		PLATFORM_CXXFLAGS += -I$(FOLLY_DIR)
-	else
-		PLATFORM_CCFLAGS += -isystem $(FOLLY_DIR)
-		PLATFORM_CXXFLAGS += -isystem $(FOLLY_DIR)
-	endif
-	PLATFORM_CCFLAGS += -DUSE_FOLLY -DFOLLY_NO_CONFIG
-	PLATFORM_CXXFLAGS += -DUSE_FOLLY -DFOLLY_NO_CONFIG
-# TODO: fix linking with fbcode compiler config
-	PLATFORM_LDFLAGS += -lglog
-endif
+include folly.mk
 
 ifdef TEST_CACHE_LINE_SIZE
   PLATFORM_CCFLAGS += -DTEST_CACHE_LINE_SIZE=$(TEST_CACHE_LINE_SIZE)
@@ -561,32 +505,6 @@ ifndef DISABLE_WARNING_AS_ERROR
 	WARNING_FLAGS += -Werror
 endif
 
-
-ifdef LUA_PATH
-
-ifndef LUA_INCLUDE
-LUA_INCLUDE=$(LUA_PATH)/include
-endif
-
-LUA_INCLUDE_FILE=$(LUA_INCLUDE)/lualib.h
-
-ifeq ("$(wildcard $(LUA_INCLUDE_FILE))", "")
-# LUA_INCLUDE_FILE does not exist
-$(error Cannot find lualib.h under $(LUA_INCLUDE).  Try to specify both LUA_PATH and LUA_INCLUDE manually)
-endif
-LUA_FLAGS = -I$(LUA_INCLUDE) -DLUA -DLUA_COMPAT_ALL
-CFLAGS += $(LUA_FLAGS)
-CXXFLAGS += $(LUA_FLAGS)
-
-ifndef LUA_LIB
-LUA_LIB = $(LUA_PATH)/lib/liblua.a
-endif
-ifeq ("$(wildcard $(LUA_LIB))", "") # LUA_LIB does not exist
-$(error $(LUA_LIB) does not exist.  Try to specify both LUA_PATH and LUA_LIB manually)
-endif
-EXEC_LDFLAGS += $(LUA_LIB)
-
-endif
 
 ifeq ($(NO_THREEWAY_CRC32C), 1)
 	CXXFLAGS += -DNO_THREEWAY_CRC32C
@@ -658,8 +576,8 @@ ifneq ($(filter check-headers, $(MAKECMDGOALS)),)
 # TODO: add/support JNI headers
 	DEV_HEADER_DIRS := $(sort include/ $(dir $(ALL_SOURCES)))
 # Some headers like in port/ are platform-specific
-	DEV_HEADERS_TO_CHECK := $(shell $(FIND) $(DEV_HEADER_DIRS) -type f -name '*.h' | grep -E -v 'port/|plugin/|lua/|range_tree/|secondary_index/')
-	PUBLIC_HEADERS_TO_CHECK := $(shell $(FIND) include/ -type f -name '*.h' | grep -E -v 'lua/')
+	DEV_HEADERS_TO_CHECK := $(shell $(FIND) $(DEV_HEADER_DIRS) -type f -name '*.h' | grep -E -v 'port/|plugin/|range_tree/|secondary_index/')
+	PUBLIC_HEADERS_TO_CHECK := $(shell $(FIND) include/ -type f -name '*.h')
 else
 	DEV_HEADERS_TO_CHECK :=
 	PUBLIC_HEADERS_TO_CHECK :=
@@ -683,6 +601,7 @@ am__v_CCH_1 =
 %.h.pub: %.h # .h.pub not actually created, so re-checked on each invocation
 	$(AM_V_CCH) cd include/ && echo '#include "$(patsubst include/%,%,$<)"' | \
 	  $(CXX) -std=$(or $(ROCKSDB_CXX_STANDARD),c++20) -I. -DROCKSDB_NAMESPACE=42 -x c++ -c - -o /dev/null
+	build_tools/check-public-header.sh $<
 
 check-headers: $(HEADER_OK_FILES)
 
@@ -708,11 +627,22 @@ ROCKSDBTESTS_SUBSET ?= $(TESTS)
 #   its various tests. Parallel can fill up your /dev/shm
 # db_bloom_filter_test - serial because excessive space usage by instances
 #   of DBFilterConstructionReserveMemoryTestWithParam can fill up /dev/shm
+# perf_context_test - 1GB write_buffer_size default, parallel can fill /dev/shm
+# obsolete_files_test - ~1GB write_buffer_size/target_file_size_base
+# backup_engine_test - 1GB write_buffer_size in FailOverwritingBackups
+# prefetch_test - 1GB write_buffer_size in PrefetchWhenReseek parameterized test
+# db_io_failure_test - 256MB write_buffer_size in FlushSstRangeSyncError and
+#   CompactionSstRangeSyncError
 NON_PARALLEL_TEST = \
 	c_test \
 	env_test \
 	deletefile_test \
 	db_bloom_filter_test \
+	perf_context_test \
+	obsolete_files_test \
+	backup_engine_test \
+	prefetch_test \
+	db_io_failure_test \
 	$(PLUGIN_TESTS) \
 
 PARALLEL_TEST = $(filter-out $(NON_PARALLEL_TEST), $(TESTS))
@@ -886,7 +816,7 @@ endif  # PLATFORM_SHARED_EXT
 .PHONY: check clean coverage ldb_tests package dbg gen-pc build_size \
 	release tags tags0 valgrind_check format static_lib shared_lib all \
 	rocksdbjavastatic rocksdbjava install install-static install-shared \
-	uninstall analyze tools tools_lib check-headers checkout_folly
+	uninstall analyze tools tools_lib check-headers checkout_folly clang-tidy
 
 all: $(LIBRARY) $(BENCHMARKS) tools tools_lib test_libs $(TESTS)
 
@@ -965,6 +895,9 @@ $(parallel_tests):
       "d=\$(TEST_TMPDIR)$$TEST_SCRIPT" \
       'mkdir -p $$d' \
       "TEST_TMPDIR=\$$d $(DRIVER) ./$$TEST_BINARY --gtest_filter=$$TEST_NAME" \
+      'test_retcode=$$?' \
+      '[ $$test_retcode -eq 0 ] && rm -rf $$d' \
+      'exit $$test_retcode' \
 		> $$TEST_SCRIPT; \
 		chmod a=rx $$TEST_SCRIPT; \
 	done
@@ -1074,9 +1007,19 @@ watch-log:
 dump-log:
 	bash -c '$(quoted_perl_command)' < LOG
 
+# Machine-parseable progress output for automated monitoring (e.g., Claude Code)
+# Outputs JSON: {"status":"running","completed":45,"total":100,"failed":0,"percent":45,"eta_seconds":120}
+check-progress:
+	@build_tools/check_progress.sh
+
 # If J != 1 and GNU parallel is installed, run the tests in parallel,
 # via the check_0 rule above.  Otherwise, run them sequentially.
 check: all
+	$(AM_V_at)echo "Cleaning up stale test directories older than 3 hours..."; \
+	  test_tmpdir_parent=$$(dirname $(TEST_TMPDIR)); \
+	  find $$test_tmpdir_parent -maxdepth 1 -name 'rocksdb.*' -type d \
+	    -mmin +180 -exec rm -rf {} + 2>/dev/null; \
+	  true
 	$(MAKE) gen_parallel_tests
 	$(AM_V_GEN)if test "$(J)" != 1                                  \
 	    && (build_tools/gnu_parallel --gnu --help 2>/dev/null) |                    \
@@ -1285,6 +1228,10 @@ tags0:
 format:
 	build_tools/format-diff.sh
 
+# Non-interactive format (auto-apply without prompts, for CI/automation/Claude Code)
+format-auto:
+	build_tools/format-diff.sh -y
+
 check-format:
 	build_tools/format-diff.sh -c
 
@@ -1293,6 +1240,15 @@ check-buck-targets:
 
 check-sources:
 	build_tools/check-sources.sh
+
+# Run clang-tidy on locally changed files, filtered to changed lines only.
+# Requires compile_commands.json (generate with cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON).
+# Override CLANG_TIDY_BINARY and CLANG_TIDY_JOBS as needed:
+#   make clang-tidy CLANG_TIDY_BINARY=/usr/bin/clang-tidy CLANG_TIDY_JOBS=8
+CLANG_TIDY_BINARY ?= /opt/homebrew/opt/llvm/bin/clang-tidy
+CLANG_TIDY_JOBS ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+clang-tidy:
+	python3 tools/run_clang_tidy.py --clang-tidy-binary $(CLANG_TIDY_BINARY) -j $(CLANG_TIDY_JOBS)
 
 package:
 	bash build_tools/make_package.sh $(SHARED_MAJOR).$(SHARED_MINOR)
@@ -1496,6 +1452,9 @@ db_test: $(OBJ_DIR)/db/db_test.o $(TEST_LIBRARY) $(LIBRARY)
 db_test2: $(OBJ_DIR)/db/db_test2.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
+db_etc3_test: $(OBJ_DIR)/db/db_etc3_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
 compression_test: $(OBJ_DIR)/util/compression_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
@@ -1518,6 +1477,9 @@ db_compaction_filter_test: $(OBJ_DIR)/db/db_compaction_filter_test.o $(TEST_LIBR
 	$(AM_LINK)
 
 db_compaction_test: $(OBJ_DIR)/db/db_compaction_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+db_compaction_abort_test: $(OBJ_DIR)/db/db_compaction_abort_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 db_clip_test: $(OBJ_DIR)/db/db_clip_test.o $(TEST_LIBRARY) $(LIBRARY)
@@ -1646,6 +1608,12 @@ object_registry_test: $(OBJ_DIR)/utilities/object_registry_test.o $(TEST_LIBRARY
 ttl_test: $(OBJ_DIR)/utilities/ttl/ttl_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
+trie_index_db_test: $(OBJ_DIR)/utilities/trie_index/trie_index_db_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+trie_index_test: $(OBJ_DIR)/utilities/trie_index/trie_index_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
 types_util_test: $(OBJ_DIR)/utilities/types_util_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
@@ -1695,6 +1663,9 @@ io_posix_test: $(OBJ_DIR)/env/io_posix_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 fault_injection_test: $(OBJ_DIR)/db/fault_injection_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+fault_injection_fs_test: $(OBJ_DIR)/utilities/fault_injection_fs_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 rate_limiter_test: $(OBJ_DIR)/util/rate_limiter_test.o $(TEST_LIBRARY) $(LIBRARY)
@@ -1895,6 +1866,9 @@ write_committed_transaction_ts_test: $(OBJ_DIR)/utilities/transactions/write_com
 write_prepared_transaction_test: $(OBJ_DIR)/utilities/transactions/write_prepared_transaction_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
+write_prepared_transaction_seqno_test: $(OBJ_DIR)/utilities/transactions/write_prepared_transaction_seqno_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
 write_unprepared_transaction_test: $(OBJ_DIR)/utilities/transactions/write_unprepared_transaction_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
@@ -1998,6 +1972,9 @@ blob_source_test: $(OBJ_DIR)/db/blob/blob_source_test.o $(TEST_LIBRARY) $(LIBRAR
 	$(AM_LINK)
 
 blob_garbage_meter_test: $(OBJ_DIR)/db/blob/blob_garbage_meter_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+io_dispatcher_test: $(OBJ_DIR)/util/io_dispatcher_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 timer_test: $(OBJ_DIR)/util/timer_test.o $(TEST_LIBRARY) $(LIBRARY)
@@ -2492,40 +2469,6 @@ commit_prereq:
 	false # J=$(J) build_tools/precommit_checker.py unit clang_unit release clang_release tsan asan ubsan lite unit_non_shm
 	# $(MAKE) clean && $(MAKE) jclean && $(MAKE) rocksdbjava;
 
-# For public CI runs, checkout folly in a way that can build with RocksDB.
-# This is mostly intended as a test-only simulation of Meta-internal folly
-# integration.
-checkout_folly:
-	if [ -e third-party/folly ]; then \
-		cd third-party/folly && ${GIT_COMMAND} fetch origin; \
-	else \
-		cd third-party && ${GIT_COMMAND} clone https://github.com/facebook/folly.git; \
-	fi
-	@# Pin to a particular version for public CI, so that PR authors don't
-	@# need to worry about folly breaking our integration. Update periodically
-	cd third-party/folly && git reset --hard e95383b7c8b5b1e46cf47acf2f317d54f93c8268
-	@# Apparently missing include
-	perl -pi -e 's/(#include <atomic>)/$$1\n#include <cstring>/' third-party/folly/folly/lang/Exception.h
-	@# Warning-as-error on memcpy
-	perl -pi -e 's/memcpy.&ptr/memcpy((void*)&ptr/' third-party/folly/folly/lang/Exception.cpp
-	@# const mismatch
-	perl -pi -e 's/: environ/: (const char**)(environ)/' third-party/folly/folly/Subprocess.cpp
-	@# NOTE: boost source will be needed for any build including `USE_FOLLY_LITE` builds as those depend on boost headers
-	cd third-party/folly && $(PYTHON) build/fbcode_builder/getdeps.py fetch boost
-
-CXX_M_FLAGS = $(filter -m%, $(CXXFLAGS))
-
-build_folly:
-	FOLLY_INST_PATH=`cd third-party/folly; $(PYTHON) build/fbcode_builder/getdeps.py show-inst-dir`; \
-	if [ "$$FOLLY_INST_PATH" ]; then \
-		rm -rf $${FOLLY_INST_PATH}/../../*; \
-	else \
-		echo "Please run checkout_folly first"; \
-		false; \
-	fi
-	cd third-party/folly && \
-		CXXFLAGS=" $(CXX_M_FLAGS) -DHAVE_CXX11_ATOMIC " $(PYTHON) build/fbcode_builder/getdeps.py build --no-tests
-
 # ---------------------------------------------------------------------------
 #   Build size testing
 # ---------------------------------------------------------------------------
@@ -2646,7 +2589,7 @@ list_all_tests:
 
 # Remove the rules for which dependencies should not be generated and see if any are left.
 #If so, include the dependencies; if not, do not include the dependency files
-ROCKS_DEP_RULES=$(filter-out clean format check-format check-buck-targets check-headers check-sources jclean jtest package analyze tags rocksdbjavastatic% unity.% unity_test checkout_folly, $(MAKECMDGOALS))
+ROCKS_DEP_RULES=$(filter-out clean format check-format check-buck-targets check-headers check-sources clang-tidy jclean jtest package analyze tags rocksdbjavastatic% unity.% unity_test checkout_folly, $(MAKECMDGOALS))
 ifneq ("$(ROCKS_DEP_RULES)", "")
 -include $(DEPFILES)
 endif

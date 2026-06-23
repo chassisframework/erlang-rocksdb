@@ -1,3 +1,101 @@
+## erlang-rocksdb 3.1.0, released on 2026/06/15
+
+### New Features
+
+- add an AES-256-CTR encrypted env: `new_env({encrypted, Key})` or `new_env(#{encrypted => Key})` with a 32-byte key encrypts all on-disk data transparently (requires OpenSSL). See the [Encrypted Env](encrypted_env.html) guide.
+
+### Bug Fixes
+
+- fix a use-after-free in column-family and transaction iterators: iterators now keep the borrowed column family or transaction alive for their lifetime
+- harden compaction filter tests against a compaction race
+
+## erlang-rocksdb 3.0.0, released on 2026/06/13
+
+### Breaking Changes
+
+- update vendored RocksDB to 11.1.1 (from 10.10.1)
+- remove deprecated functions. Migrate as follows:
+  - `write/3`: use the batch API (`batch/0`, `batch_put/3,4`, `write_batch/3`)
+  - `fold/4,5`, `fold_keys/4,5`, `count/1,2`: use the iterator API
+  - `new_lru_cache/1`, `new_clock_cache/1`: use `new_cache/2`
+  - `get_usage/1`, `get_pinned_usage/1`, `get_capacity/1`: use `cache_info/1,2`
+  - `default_env/0`, `mem_env/0`: use `new_env/1`
+  - `updates_iterator/2`, `close_updates_iterator/1`, `next_binary_update/1`, `next_update/1`: use the `tlog_*` functions
+  - `drop_column_family/1`, `destroy_column_family/1`: use the `/2` arities
+  - `open_with_cf/3`: use `open/3`
+- `block_based_table_options` `format_version` below 2 is no longer supported by RocksDB 11.0 (default is now 7)
+
+### New Features
+
+- add `abort_all_compactions/1` and `resume_all_compactions/1` (RocksDB 11.0)
+- FIFO compaction options (RocksDB 11.0): `max_data_files_size`, `use_kv_ratio_compaction`
+- `block_based_table_options` (RocksDB 11.0/11.1):
+  - `index_block_search_type`: `binary_search` | `interpolation` | `auto`
+  - `uniform_cv_threshold`
+  - `prepopulate_block_cache`: `disable` | `flush_only` | `flush_and_compaction`
+- DB options (RocksDB 11.1):
+  - `open_files_async` (requires `skip_stats_update_on_db_open = true`)
+  - `enforce_write_buffer_manager_during_recovery`
+  - `verify_manifest_content_on_close`
+- column family option (RocksDB 11.1): `memtable_batch_lookup_optimization`
+- wide-column entity column values are stored in blob files when `min_blob_size` is set (RocksDB 11.0)
+
+### Notes
+
+- the `blob_db_write_inlined` and `blob_db_write_inlined_ttl` statistics tickers are deprecated upstream and now always report 0
+
+## erlang-rocksdb 2.6.2, released on 2026/04/05
+
+### Bug Fixes
+
+- fix hex package to include all rocksdb source directories required by CMake
+
+## erlang-rocksdb 2.6.1, released on 2026/04/05
+
+### Bug Fixes
+
+- fix hex package to include rocksdb tools directory required by CMake
+
+## erlang-rocksdb 2.6.0, released on 2026/04/05
+
+### New Features
+
+- add background work control APIs (RocksDB 10.8+):
+  - `pause_background_work/1`: pause all background processes (flush, compaction)
+  - `continue_background_work/1`: resume background processes
+  - `disable_manual_compaction/1`: disable CompactRange/CompactFiles
+  - `enable_manual_compaction/1`: re-enable manual compactions
+
+- add `flush_wal/2` with options (RocksDB 10.8+):
+  - `{sync, boolean()}`: call SyncWAL afterwards (default: false)
+  - `{rate_limiter_priority, io_low | io_mid | io_high | io_user | io_total}`: rate limiter priority for IO operations
+
+- add `max_manifest_space_amp_pct` DB option (RocksDB 10.9+):
+  - Controls manifest write/space amplification tradeoff
+  - Default: 500 (0.2 write amp, up to ~5.0 space amp)
+  - Lower values mean more manifest compactions but smaller manifest files
+
+- add `target_file_size_is_upper_bound` CF option (RocksDB 10.10+):
+  - When true, considers estimated tail size (filter + index + meta blocks) when cutting compaction output files
+  - Prevents SST files from exceeding target_file_size_base
+  - Default: false
+
+- add zstd compression support with bundled fallback:
+  - zstd enabled by default (`WITH_ZSTD=ON`)
+  - Uses system zstd library if available
+  - Falls back to bundled zstd 1.5.7 if system library not found
+  - Set `WITH_BUNDLE_ZSTD=OFF` to disable fallback
+
+- add `supported_compressions/0`: returns list of compression types supported by this build
+
+### Improvements
+
+- bump to RocksDB version [10.10.1](https://github.com/facebook/rocksdb/releases/tag/v10.10.1)
+  - 10.8.0: New APIs (resumable compaction, FlushWALOptions)
+  - 10.9.0: New features (auto-tuning manifest, target_file_size_is_upper_bound)
+  - 10.10.0: Bug fixes
+  - 10.10.1: Windows build fixes
+
 ## erlang-rocksdb 2.5.0, released on 2026/01/07
 
 ### New Features

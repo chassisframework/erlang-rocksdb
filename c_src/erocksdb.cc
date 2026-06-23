@@ -59,6 +59,14 @@ static ErlNifFunc nif_funcs[] =
         {"get_property", 3, erocksdb::GetProperty, ERL_NIF_REGULAR_BOUND},
         {"flush", 3, erocksdb::Flush, ERL_NIF_DIRTY_JOB_IO_BOUND},
         {"sync_wal", 1, erocksdb::SyncWal, ERL_NIF_DIRTY_JOB_IO_BOUND},
+        {"flush_wal", 2, erocksdb::FlushWal, ERL_NIF_DIRTY_JOB_IO_BOUND},
+        {"supported_compressions", 0, erocksdb::SupportedCompressions, ERL_NIF_REGULAR_BOUND},
+        {"pause_background_work", 1, erocksdb::PauseBackgroundWork, ERL_NIF_DIRTY_JOB_IO_BOUND},
+        {"continue_background_work", 1, erocksdb::ContinueBackgroundWork, ERL_NIF_DIRTY_JOB_IO_BOUND},
+        {"disable_manual_compaction", 1, erocksdb::DisableManualCompaction, ERL_NIF_REGULAR_BOUND},
+        {"enable_manual_compaction", 1, erocksdb::EnableManualCompaction, ERL_NIF_REGULAR_BOUND},
+        {"abort_all_compactions", 1, erocksdb::AbortAllCompactions, ERL_NIF_DIRTY_JOB_IO_BOUND},
+        {"resume_all_compactions", 1, erocksdb::ResumeAllCompactions, ERL_NIF_DIRTY_JOB_IO_BOUND},
         {"set_db_background_threads", 2, erocksdb::SetDBBackgroundThreads, ERL_NIF_REGULAR_BOUND},
 
         {"get_approximate_sizes", 3, erocksdb::GetApproximateSizes, ERL_NIF_DIRTY_JOB_IO_BOUND},
@@ -74,9 +82,7 @@ static ErlNifFunc nif_funcs[] =
         // column families
         {"list_column_families", 2, erocksdb::ListColumnFamilies, ERL_NIF_DIRTY_JOB_IO_BOUND},
         {"create_column_family", 3, erocksdb::CreateColumnFamily, ERL_NIF_DIRTY_JOB_IO_BOUND},
-        {"drop_column_family", 1, erocksdb::DropColumnFamily, ERL_NIF_DIRTY_JOB_IO_BOUND},
         {"drop_column_family", 2, erocksdb::DropColumnFamily, ERL_NIF_DIRTY_JOB_IO_BOUND},
-        {"destroy_column_family", 1, erocksdb::DestroyColumnFamily, ERL_NIF_DIRTY_JOB_IO_BOUND},
         {"destroy_column_family", 2, erocksdb::DestroyColumnFamily, ERL_NIF_DIRTY_JOB_IO_BOUND},
         {"get_column_family_metadata", 1, erocksdb::GetColumnFamilyMetaData, ERL_NIF_DIRTY_JOB_IO_BOUND},
         {"get_column_family_metadata", 2, erocksdb::GetColumnFamilyMetaData, ERL_NIF_DIRTY_JOB_IO_BOUND},
@@ -330,6 +336,7 @@ ERL_NIF_TERM ATOM_UNDEFINED;
 // related to envs
 ERL_NIF_TERM ATOM_DEFAULT;
 ERL_NIF_TERM ATOM_MEMENV;
+ERL_NIF_TERM ATOM_ENCRYPTED;
 
 // related to cache
 ERL_NIF_TERM ATOM_LRU;
@@ -894,6 +901,35 @@ ERL_NIF_TERM ATOM_TOTAL_BLOB_BYTES;
 ERL_NIF_TERM ATOM_GARBAGE_BLOB_COUNT;
 ERL_NIF_TERM ATOM_GARBAGE_BLOB_BYTES;
 
+// FlushWAL options (RocksDB 10.8+)
+ERL_NIF_TERM ATOM_RATE_LIMITER_PRIORITY;
+ERL_NIF_TERM ATOM_IO_LOW;
+ERL_NIF_TERM ATOM_IO_MID;
+ERL_NIF_TERM ATOM_IO_HIGH;
+ERL_NIF_TERM ATOM_IO_USER;
+ERL_NIF_TERM ATOM_IO_TOTAL;
+
+// Manifest auto-tuning (RocksDB 10.9+)
+ERL_NIF_TERM ATOM_MAX_MANIFEST_SPACE_AMP_PCT;
+
+// CF option for compaction file size control (RocksDB 10.10+)
+ERL_NIF_TERM ATOM_TARGET_FILE_SIZE_IS_UPPER_BOUND;
+
+// Options added in RocksDB 11.0/11.1
+ERL_NIF_TERM ATOM_OPEN_FILES_ASYNC;
+ERL_NIF_TERM ATOM_ENFORCE_WRITE_BUFFER_MANAGER_DURING_RECOVERY;
+ERL_NIF_TERM ATOM_VERIFY_MANIFEST_CONTENT_ON_CLOSE;
+ERL_NIF_TERM ATOM_MEMTABLE_BATCH_LOOKUP_OPTIMIZATION;
+ERL_NIF_TERM ATOM_MAX_DATA_FILES_SIZE;
+ERL_NIF_TERM ATOM_USE_KV_RATIO_COMPACTION;
+ERL_NIF_TERM ATOM_INDEX_BLOCK_SEARCH_TYPE;
+ERL_NIF_TERM ATOM_UNIFORM_CV_THRESHOLD;
+ERL_NIF_TERM ATOM_PREPOPULATE_BLOCK_CACHE;
+ERL_NIF_TERM ATOM_FLUSH_AND_COMPACTION;
+ERL_NIF_TERM ATOM_BINARY_SEARCH;
+ERL_NIF_TERM ATOM_INTERPOLATION;
+ERL_NIF_TERM ATOM_AUTO;
+
 }   // namespace erocksdb
 
 
@@ -953,6 +989,7 @@ try
 
   ATOM(erocksdb::ATOM_DEFAULT, "default");
   ATOM(erocksdb::ATOM_MEMENV, "memenv");
+  ATOM(erocksdb::ATOM_ENCRYPTED, "encrypted");
 
   ATOM(erocksdb::ATOM_LRU, "lru");
   ATOM(erocksdb::ATOM_CLOCK, "clock");
@@ -1511,6 +1548,35 @@ try
   ATOM(erocksdb::ATOM_TOTAL_BLOB_BYTES, "total_blob_bytes");
   ATOM(erocksdb::ATOM_GARBAGE_BLOB_COUNT, "garbage_blob_count");
   ATOM(erocksdb::ATOM_GARBAGE_BLOB_BYTES, "garbage_blob_bytes");
+
+  // FlushWAL options (RocksDB 10.8+)
+  ATOM(erocksdb::ATOM_RATE_LIMITER_PRIORITY, "rate_limiter_priority");
+  ATOM(erocksdb::ATOM_IO_LOW, "io_low");
+  ATOM(erocksdb::ATOM_IO_MID, "io_mid");
+  ATOM(erocksdb::ATOM_IO_HIGH, "io_high");
+  ATOM(erocksdb::ATOM_IO_USER, "io_user");
+  ATOM(erocksdb::ATOM_IO_TOTAL, "io_total");
+
+  // Manifest auto-tuning (RocksDB 10.9+)
+  ATOM(erocksdb::ATOM_MAX_MANIFEST_SPACE_AMP_PCT, "max_manifest_space_amp_pct");
+
+  // CF option for compaction file size control (RocksDB 10.10+)
+  ATOM(erocksdb::ATOM_TARGET_FILE_SIZE_IS_UPPER_BOUND, "target_file_size_is_upper_bound");
+
+  // Options added in RocksDB 11.0/11.1
+  ATOM(erocksdb::ATOM_OPEN_FILES_ASYNC, "open_files_async");
+  ATOM(erocksdb::ATOM_ENFORCE_WRITE_BUFFER_MANAGER_DURING_RECOVERY, "enforce_write_buffer_manager_during_recovery");
+  ATOM(erocksdb::ATOM_VERIFY_MANIFEST_CONTENT_ON_CLOSE, "verify_manifest_content_on_close");
+  ATOM(erocksdb::ATOM_MEMTABLE_BATCH_LOOKUP_OPTIMIZATION, "memtable_batch_lookup_optimization");
+  ATOM(erocksdb::ATOM_MAX_DATA_FILES_SIZE, "max_data_files_size");
+  ATOM(erocksdb::ATOM_USE_KV_RATIO_COMPACTION, "use_kv_ratio_compaction");
+  ATOM(erocksdb::ATOM_INDEX_BLOCK_SEARCH_TYPE, "index_block_search_type");
+  ATOM(erocksdb::ATOM_UNIFORM_CV_THRESHOLD, "uniform_cv_threshold");
+  ATOM(erocksdb::ATOM_PREPOPULATE_BLOCK_CACHE, "prepopulate_block_cache");
+  ATOM(erocksdb::ATOM_FLUSH_AND_COMPACTION, "flush_and_compaction");
+  ATOM(erocksdb::ATOM_BINARY_SEARCH, "binary_search");
+  ATOM(erocksdb::ATOM_INTERPOLATION, "interpolation");
+  ATOM(erocksdb::ATOM_AUTO, "auto");
 
 #undef ATOM
 

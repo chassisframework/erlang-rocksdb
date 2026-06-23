@@ -32,7 +32,7 @@
 #include "rocksdb/version.h"
 #include "rocksdb/write_buffer_manager.h"
 
-#ifdef max
+#ifdef max  // ODR-SAFE
 #undef max
 #endif
 
@@ -58,6 +58,7 @@ class InternalKeyComparator;
 class WalFilter;
 class FileSystem;
 class UserDefinedIndexFactory;
+class IODispatcher;
 
 struct Options;
 struct DbPath;
@@ -303,9 +304,6 @@ struct ColumnFamilyOptions : public AdvancedColumnFamilyOptions {
   //
   // Dynamically changeable through SetOptions() API
   uint64_t max_bytes_for_level_base = 256 * 1048576;
-
-  // Deprecated.
-  uint64_t snap_refresh_nanos = 0;
 
   // Disable automatic compactions. Manual compactions can still
   // be issued on this column family
@@ -785,6 +783,25 @@ struct DBOptions {
   // Default: 16
   int max_file_opening_threads = 16;
 
+  // If true, SST files are opened and validated asynchronously in the
+  // background after DB::Open returns. This reduces DB open time for
+  // databases with many SST files and high latency file systems. Mostly useful
+  // when max_open_files = -1, as max_open_files != -1 usually has fast open
+  // times. See also `max_file_opening_threads` and
+  // `skip_stats_update_on_db_open` to improve file open latency.
+  //
+  // Note: This option is currently not compatible with FIFO compaction and
+  // requires skip_stats_update_on_db_open=true.
+  //
+  // Errors will no longer show up in DB::Open, but instead can show up as
+  // either background errors and/or operations that access the file (e.g.
+  // reads, compactions).
+  //
+  // When false (default), SST files are opened and validated during DB::Open.
+  //
+  // Default: false
+  bool open_files_async = false;
+
   // Once write-ahead logs exceed this size, we will start forcing the flush of
   // column families whose memtables are backed by the oldest live WAL file
   // (i.e. the ones that are causing all the space amplification). If set to 0
@@ -958,11 +975,73 @@ struct DBOptions {
   // Default: 0
   size_t recycle_log_file_num = 0;
 
-  // manifest file is rolled over on reaching this limit.
-  // The older manifest file be deleted.
-  // The default value is 1GB so that the manifest file can grow, but not
-  // reach the limit of storage capacity.
+  // The manifest file is rolled over on reaching this limit AND the
+  // space amp limit described in max_manifest_space_amp_pct. More trade-off
+  // details there.
+  //
+  // NOTE: this option used to be a hard limit, but that made this a dangerous
+  // tuning parameter for optimizing manifest file size because the best
+  // size really depends on the DB size and average SST file size (and other
+  // settings). Now it is essentially a minimum for the auto-tuned max manifest
+  // file size.
+  //
+  // Until the max_manifest_space_amp_pct feature is fully validated to show a
+  // smaller default here like 1MB is appropriate, the default value is 1GB to
+  // match historical behavior (without it being a hard limit in case of giant
+  // compacted manifest size).
+  //
+  // This option is mutable with SetDBOptions(), taking effect on the next
+  // manifest write (e.g. completed DB compaction or flush).
   uint64_t max_manifest_file_size = 1024 * 1024 * 1024;
+
+  // If true, on DB close, read back the entire MANIFEST file and validate
+  // CRC checksums and logical record content. If corruption is detected,
+  // a fresh MANIFEST is written from in-memory state before closing.
+  //
+  // This option is mutable with SetDBOptions().
+  bool verify_manifest_content_on_close = false;
+
+  // This option mostly replaces max_manifest_file_size to control an auto-tuned
+  // balance of manifest write amplification and space amplification. A new
+  // manifest file is created with the "compacted" contents of the old one when
+  //  current_manifest_size
+  //    >
+  //  max(max_manifest_file_size,
+  //      est_compacted_manifest_size * (1 + max_manifest_space_amp_pct/100))
+  //
+  // where est_compacted_manifest_size is an estimate of how big a new compacted
+  // version of the current manifest would be. Currently, the estimate used is
+  // the last newly-written manifest, in its "compacted" form.
+  //
+  // Space amplification in the manifest file might be less of a concern for
+  // primary storage space and more of a concern for DB recover time and size of
+  // backup files that aren't incremental between backups. To minimize manifest
+  // churn on initial DB population, setting max_manifest_file_size to something
+  // not too small, like 1MB, should suffice. Similarly, write amp on the
+  // manifest file is likely not a direct concern but completed compactions and
+  // flushes cannot (currently) be committed while the (relatively small)
+  // manifest file is being compacted. Manifest compactions should not
+  // interfere with user write latency or throughput unless the DB is
+  // chronically stalling or close to stalling writes already.
+  //
+  // For this option to have a meaningful effect, it is recommended to set
+  // max_manifest_file_size to something modest like 1MB. Then we can interpret
+  // values for this option as follows, starting with minimum space amp and
+  // maximum write amp:
+  // * 0 - Every manifest write (flush, compaction, etc.) generates a whole new
+  // manifest. Only useful for testing.
+  // * very small - Doesn't take many manifest writes to generate a whole new
+  // manifest.
+  // * 100 - In a DB with pretty consistent number of SST files, etc., achieves
+  // about 1.0 write amp (writing about 2x the theoretical minimum) and a max of
+  // about 1.0 space amp (manifest up to 2x the compacted size).
+  // * 500 - Recommended and default: 0.2 write amp and up to roughly 5.0 space
+  // amp.
+  // * 10000 - 0.01 write amp and up to 100 space amp on the manifest.
+  //
+  // This option is mutable with SetDBOptions(), taking effect on the next
+  // manifest write (e.g. completed DB compaction or flush).
+  int max_manifest_space_amp_pct = 500;
 
   // Number of shards used for table cache.
   int table_cache_numshardbits = 6;
@@ -1307,17 +1386,6 @@ struct DBOptions {
   // Default: false
   bool skip_stats_update_on_db_open = false;
 
-  // This option is deprecated and marked as no-op. Kept for backward
-  // compatibility until usage is fully removed.
-  // File size check will be performed through a thread
-  // pool during DB Open, when max_open_files is set to -1.
-  // Therefore, the concern of DB Open slowness is eliminated.
-  // Note that when max_open_files is not set to -1, only a subset of files will
-  // be opened and checked during DB Open.
-  //
-  // Default: false
-  bool skip_checking_sst_file_sizes_on_db_open = false;
-
   // Recovery mode to control the consistency while replaying WAL
   // Default: kPointInTimeRecovery
   WALRecoveryMode wal_recovery_mode = WALRecoveryMode::kPointInTimeRecovery;
@@ -1350,8 +1418,29 @@ struct DBOptions {
   // WAL logs will be kept, so that if crash happened before flush, we still
   // have logs to recover from.
   //
+  // Note: when `enforce_write_buffer_manager_during_recovery` is also enabled,
+  // flushes may still occur during recovery to respect the
+  // WriteBufferManager's global memory limit, even if this option is true.
+  // Once any such WBM-triggered flush happens, all remaining memtables will
+  // also be flushed at the end of recovery (similar to the behavior when this
+  // option is false).
+  //
   // DEFAULT: false
   bool avoid_flush_during_recovery = false;
+
+  // If true and a WriteBufferManager is configured, RocksDB will check
+  // WriteBufferManager::ShouldFlush() during WAL recovery and schedule
+  // flushes when needed. This prevents OOM when multiple RocksDB instances
+  // share a WriteBufferManager and one instance is recovering from WAL.
+  //
+  // When triggered, all column families with non-empty memtables are scheduled
+  // for flush, which may produce smaller L0 files in some column families.
+  // This also overrides `avoid_flush_during_recovery`: once a WBM-triggered
+  // flush occurs mid-recovery, all remaining non-empty memtables will be
+  // flushed at the end of recovery as well.
+  //
+  // DEFAULT: true
+  bool enforce_write_buffer_manager_during_recovery = true;
 
   // By default RocksDB will flush all memtables on DB close if there are
   // unpersisted data (i.e. with WAL disabled) The flush can be skip to speedup
@@ -1792,11 +1881,13 @@ class MultiScanArgs {
     io_coalesce_threshold = other.io_coalesce_threshold;
     max_prefetch_size = other.max_prefetch_size;
     use_async_io = other.use_async_io;
+    io_dispatcher = other.io_dispatcher;
   }
   MultiScanArgs(MultiScanArgs&& other) noexcept
       : io_coalesce_threshold(other.io_coalesce_threshold),
         max_prefetch_size(other.max_prefetch_size),
         use_async_io(other.use_async_io),
+        io_dispatcher(std::move(other.io_dispatcher)),
         comp_(other.comp_),
         original_ranges_(std::move(other.original_ranges_)) {}
 
@@ -1806,6 +1897,7 @@ class MultiScanArgs {
     io_coalesce_threshold = other.io_coalesce_threshold;
     max_prefetch_size = other.max_prefetch_size;
     use_async_io = other.use_async_io;
+    io_dispatcher = other.io_dispatcher;
     return *this;
   }
 
@@ -1816,6 +1908,7 @@ class MultiScanArgs {
       io_coalesce_threshold = other.io_coalesce_threshold;
       max_prefetch_size = other.max_prefetch_size;
       use_async_io = other.use_async_io;
+      io_dispatcher = std::move(other.io_dispatcher);
     }
     return *this;
   }
@@ -1863,6 +1956,7 @@ class MultiScanArgs {
     io_coalesce_threshold = other.io_coalesce_threshold;
     max_prefetch_size = other.max_prefetch_size;
     use_async_io = other.use_async_io;
+    io_dispatcher = other.io_dispatcher;
   }
 
   uint64_t io_coalesce_threshold = 16 << 10;  // 16KB by default
@@ -1883,6 +1977,12 @@ class MultiScanArgs {
   // When true, BlockBasedTableIterator will use ReadAsync() for reading blocks
   // When false, it will use synchronous MultiRead().
   bool use_async_io = false;
+
+  // Optional IODispatcher for multi-scan operations.
+  // If nullptr (default), a new IODispatcher is created internally.
+  // Users can provide their own IODispatcher for custom IO scheduling
+  // or for testing/monitoring purposes (e.g., to check IO statistics).
+  std::shared_ptr<IODispatcher> io_dispatcher = nullptr;
 
  private:
   // The comparator used for ordering ranges
@@ -2053,10 +2153,6 @@ struct ReadOptions {
   // that were inserted into the database after the creation of the iterator.
   bool tailing = false;
 
-  // This options is not used anymore. It was to turn on a functionality that
-  // has been removed. DEPRECATED
-  bool managed = false;
-
   // Enable a total order seek regardless of index format (e.g. hash index)
   // used in the table. Some table format (e.g. plain table) may not support
   // this option.
@@ -2186,9 +2282,10 @@ struct ReadOptions {
   // block based table index. The table_factory used for the column family
   // must support building/reading this index.
   //
-  // Currently, only forward scans are supported. For forward scans, only Seek()
-  // is supported. SeekToFirst() is not supported. If the caller wishes to scan
-  // from start to end, the native index must be used.
+  // Forward scans (SeekToFirst, Seek, Next) and point lookups (Get) are
+  // supported. Reverse operations (SeekToLast, SeekForPrev, Prev) are not
+  // yet supported and will return NotSupported when this is set. Leave this
+  // null to use the native index for reverse operations.
   const UserDefinedIndexFactory* table_index_factory = nullptr;
 
   // *** END options only relevant to iterators or scans ***
@@ -2324,6 +2421,23 @@ struct FlushOptions {
   FlushOptions() : wait(true), allow_write_stall(false) {}
 };
 
+struct FlushWALOptions {
+  // If true, it calls `SyncWAL()` afterwards.
+  // Default: false
+  bool sync;
+
+  // For IO operations associated with flushing the WAL, charge the internal
+  // rate limiter (see `DBOptions::rate_limiter`) at the specified priority and
+  // pass the priority down to the file system through
+  // `IOOptions::rate_limiter_priority`. The special value `Env::IO_TOTAL`
+  // disables charging the rate limiter.
+  //
+  // Default: `Env::IO_TOTAL`
+  Env::IOPriority rate_limiter_priority;
+
+  FlushWALOptions() : sync(false), rate_limiter_priority(Env::IO_TOTAL) {}
+};
+
 // Create a Logger from provided DBOptions
 Status CreateLoggerFromOptions(const std::string& dbname,
                                const DBOptions& options,
@@ -2361,11 +2475,22 @@ struct CompactionOptions {
   // canceled variable in CompactionOptions, as it does for CompactRangeOptions
   // - this is because ManualCompactionState is not used
 
+  // Create output compaction file using this file temperature. If unset, will
+  // default to "last_level_temperature" if output level is last level otherwise
+  // "default_write_temperature"
+  Temperature output_temperature_override = Temperature::kUnknown;
+
+  // Option to optimize the manual compaction by enabling trivial move for non
+  // overlapping files.
+  // Default: false
+  bool allow_trivial_move;
+
   CompactionOptions()
       : compression(kDisableCompressionOption),
         output_file_size_limit(std::numeric_limits<uint64_t>::max()),
         max_subcompactions(0),
-        canceled(nullptr) {}
+        canceled(nullptr),
+        allow_trivial_move(false) {}
 };
 
 // For level based compaction, we can configure if we want to skip/force
@@ -2786,6 +2911,43 @@ struct CompactionServiceOptionsOverride {
 struct OpenAndCompactOptions {
   // Allows cancellation of an in-progress compaction.
   std::atomic<bool>* canceled = nullptr;
+
+  // EXPERIMENTAL
+  //
+  // Controls whether OpenAndCompact() should attempt to resume from previously
+  // persisted compaction progress or start fresh.
+  //
+  // When `allow_resumption = true`:
+  // - OpenAndCompact() attempts to resume from previously persisted compaction
+  //   progress stored in `output_directory`
+  // - During execution, it periodically persists new progress to the same
+  //   directory, allowing future calls to continue from where the previous
+  //   compaction left off.
+  // - Fallback behavior: If resumption cannot be fulfilled (e.g., due to
+  //   corrupted or missing resume state), the system will attempt to start a
+  //   fresh compaction as a best-effort fallback by cleaning related files in
+  //   the `output_directory` to achieve a clean state. If even the fresh
+  //   compaction cannot be started, a non-OK status will be returned.
+  // - Important: Resume attempts will be ineffective if the underlying
+  //   conditions that caused the previous OpenAndCompact() failure still
+  //   persist. The same non-OK status will likely be returned unless the root
+  //   cause has been resolved.
+  // - Progress persistence is sequential and best-effort, triggered upon
+  //   completion of each new output file. If compaction is interrupted while
+  //   creating an output file (before its completion), that partial work will
+  //   need to be redone upon resumption.
+  //
+  // When `allow_resumption = false`:
+  // - OpenAndCompact() starts a fresh compaction from scratch.
+  // - No progress will be saved during execution, so interruptions require
+  //   starting over completely.
+  // - CRITICAL REQUIREMENT: The `output_directory` associated MUST be empty
+  //   before calling OpenAndCompact(). Any existing files (including resume
+  //   state or output files from previous runs) may cause correctness errors.
+  //
+  // Limitation: Currently incompatible with paranoid_file_checks=true. The
+  // option is effectively disabled when `paranoid_file_checks` is enabled.
+  bool allow_resumption = false;
 };
 
 struct LiveFilesStorageInfoOptions {

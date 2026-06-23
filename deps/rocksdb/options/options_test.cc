@@ -160,6 +160,7 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
       {"keep_log_file_num", "39"},
       {"recycle_log_file_num", "5"},
       {"max_manifest_file_size", "40"},
+      {"max_manifest_space_amp_pct", "42"},
       {"table_cache_numshardbits", "41"},
       {"WAL_ttl_seconds", "43"},
       {"WAL_size_limit_MB", "44"},
@@ -341,7 +342,8 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_db_opt.log_file_time_to_roll, 38U);
   ASSERT_EQ(new_db_opt.keep_log_file_num, 39U);
   ASSERT_EQ(new_db_opt.recycle_log_file_num, 5U);
-  ASSERT_EQ(new_db_opt.max_manifest_file_size, static_cast<uint64_t>(40));
+  ASSERT_EQ(new_db_opt.max_manifest_file_size, uint64_t{40});
+  ASSERT_EQ(new_db_opt.max_manifest_space_amp_pct, 42);
   ASSERT_EQ(new_db_opt.table_cache_numshardbits, 41);
   ASSERT_EQ(new_db_opt.WAL_ttl_seconds, static_cast<uint64_t>(43));
   ASSERT_EQ(new_db_opt.WAL_size_limit_MB, static_cast<uint64_t>(44));
@@ -1720,20 +1722,49 @@ TEST_F(OptionsTest, MutableCFOptions) {
 
   ASSERT_OK(GetColumnFamilyOptionsFromString(
       config_options, cf_opts,
-      "paranoid_file_checks=true; block_based_table_factory.block_align=false; "
+      "paranoid_file_checks=true; "
+      "verify_output_flags=2049; "
+      "block_based_table_factory.block_align=false; "
+      "block_based_table_factory.super_block_alignment_size=65536; "
+      "block_based_table_factory.super_block_alignment_space_overhead_ratio="
+      "4096; "
       "block_based_table_factory.block_size=8192;",
       &cf_opts));
   ASSERT_TRUE(cf_opts.paranoid_file_checks);
+  ASSERT_NE(
+      (cf_opts.verify_output_flags & VerifyOutputFlags::kVerifyBlockChecksum),
+      VerifyOutputFlags::kVerifyNone);
+  ASSERT_NE((cf_opts.verify_output_flags &
+             VerifyOutputFlags::kEnableForRemoteCompaction),
+            VerifyOutputFlags::kVerifyNone);
+  ASSERT_EQ((cf_opts.verify_output_flags &
+             VerifyOutputFlags::kEnableForLocalCompaction),
+            VerifyOutputFlags::kVerifyNone);
   ASSERT_NE(cf_opts.table_factory.get(), nullptr);
   auto* bbto = cf_opts.table_factory->GetOptions<BlockBasedTableOptions>();
   ASSERT_NE(bbto, nullptr);
   ASSERT_EQ(bbto->block_size, 8192);
   ASSERT_EQ(bbto->block_align, false);
+  ASSERT_EQ(bbto->super_block_alignment_size, 65536);
+  ASSERT_EQ(bbto->super_block_alignment_space_overhead_ratio, 4096);
   std::unordered_map<std::string, std::string> unused_opts;
   ASSERT_OK(GetColumnFamilyOptionsFromMap(
       config_options, cf_opts, {{"paranoid_file_checks", "false"}}, &cf_opts));
   ASSERT_EQ(cf_opts.paranoid_file_checks, false);
 
+  // Test verify_output_flags with kVerifyFileChecksum (bit 2)
+  // 2052 = 4 (kVerifyFileChecksum) | 2048 (kEnableForRemoteCompaction)
+  ASSERT_OK(GetColumnFamilyOptionsFromString(
+      config_options, cf_opts, "verify_output_flags=2052;", &cf_opts));
+  ASSERT_NE(
+      (cf_opts.verify_output_flags & VerifyOutputFlags::kVerifyFileChecksum),
+      VerifyOutputFlags::kVerifyNone);
+  ASSERT_NE((cf_opts.verify_output_flags &
+             VerifyOutputFlags::kEnableForRemoteCompaction),
+            VerifyOutputFlags::kVerifyNone);
+  ASSERT_EQ(
+      (cf_opts.verify_output_flags & VerifyOutputFlags::kVerifyBlockChecksum),
+      VerifyOutputFlags::kVerifyNone);
   // Should replace the factory with the new setting
   ASSERT_OK(GetColumnFamilyOptionsFromMap(
       config_options, cf_opts,
@@ -2399,6 +2430,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
       {"max_compaction_bytes", "21"},
       {"soft_rate_limit", "1.1"},
       {"hard_rate_limit", "2.1"},
+      {"snap_refresh_nanos", "1000000"},
       {"rate_limit_delay_max_milliseconds", "100"},
       {"hard_pending_compaction_bytes_limit", "211"},
       {"arena_block_size", "22"},
@@ -2463,6 +2495,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
       {"keep_log_file_num", "39"},
       {"recycle_log_file_num", "5"},
       {"max_manifest_file_size", "40"},
+      {"max_manifest_space_amp_pct", "42"},
       {"table_cache_numshardbits", "41"},
       {"WAL_ttl_seconds", "43"},
       {"WAL_size_limit_MB", "44"},
@@ -2576,6 +2609,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.optimize_filters_for_hits, true);
   ASSERT_EQ(new_cf_opt.prefix_extractor->AsString(), "rocksdb.FixedPrefix.31");
   ASSERT_EQ(new_cf_opt.experimental_mempurge_threshold, 0.003);
+  ASSERT_EQ(new_cf_opt.verify_output_flags, VerifyOutputFlags::kVerifyNone);
   ASSERT_EQ(new_cf_opt.enable_blob_files, true);
   ASSERT_EQ(new_cf_opt.min_blob_size, 1ULL << 10);
   ASSERT_EQ(new_cf_opt.blob_file_size, 1ULL << 30);
@@ -2648,7 +2682,8 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_db_opt.log_file_time_to_roll, 38U);
   ASSERT_EQ(new_db_opt.keep_log_file_num, 39U);
   ASSERT_EQ(new_db_opt.recycle_log_file_num, 5U);
-  ASSERT_EQ(new_db_opt.max_manifest_file_size, static_cast<uint64_t>(40));
+  ASSERT_EQ(new_db_opt.max_manifest_file_size, uint64_t{40});
+  ASSERT_EQ(new_db_opt.max_manifest_space_amp_pct, 42);
   ASSERT_EQ(new_db_opt.table_cache_numshardbits, 41);
   ASSERT_EQ(new_db_opt.WAL_ttl_seconds, static_cast<uint64_t>(43));
   ASSERT_EQ(new_db_opt.WAL_size_limit_MB, static_cast<uint64_t>(44));

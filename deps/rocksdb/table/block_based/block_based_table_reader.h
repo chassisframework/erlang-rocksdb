@@ -208,10 +208,12 @@ class BlockBasedTable : public TableReader {
   size_t ApproximateMemoryUsage() const override;
 
   // convert SST file to a human readable form
-  Status DumpTable(WritableFile* out_file) override;
+  Status DumpTable(WritableFile* out_file,
+                   bool show_sequence_number_type = false) override;
 
   Status VerifyChecksum(const ReadOptions& readOptions,
-                        TableReaderCaller caller) override;
+                        TableReaderCaller caller,
+                        bool meta_blocks_only = false) override;
 
   void MarkObsolete(uint32_t uncache_aggressiveness) override;
 
@@ -429,7 +431,7 @@ class BlockBasedTable : public TableReader {
   //  3. We disallowed any io to be performed, that is, read_options ==
   //     kBlockCacheTier
   InternalIteratorBase<IndexValue>* NewIndexIterator(
-      const ReadOptions& read_options, bool need_upper_bound_check,
+      const ReadOptions& read_options, bool disable_prefix_seek,
       IndexBlockIter* input_iter, GetContext* get_context,
       BlockCacheLookupContext* lookup_context) const;
 
@@ -548,9 +550,15 @@ class BlockBasedTable : public TableReader {
 
   // Helper functions for DumpTable()
   Status DumpIndexBlock(std::ostream& out_stream);
-  Status DumpDataBlocks(std::ostream& out_stream);
+  Status DumpDataBlocks(std::ostream& out_stream,
+                        bool show_sequence_number_type = false);
   void DumpKeyValue(const Slice& key, const Slice& value,
-                    std::ostream& out_stream);
+                    std::ostream& out_stream,
+                    bool show_sequence_number_type = false);
+  void DumpBlockChecksumInfo(const BlockHandle& block_handle,
+                             const ReadOptions& read_options,
+                             const char* block_name,
+                             std::ostream& out_stream) const;
 
   // Returns false if prefix_extractor exists and is compatible with that used
   // in building the table file, otherwise true.
@@ -571,6 +579,8 @@ class BlockBasedTable : public TableReader {
   friend class PartitionedFilterBlockReader;
   friend class PartitionedFilterBlockTest;
   friend class DBBasicTest_MultiGetIOBufferOverrun_Test;
+  friend class ReadSet;
+  friend class IODispatcherTest;
 };
 
 // Maintaining state of a two-level iteration on a partitioned index structure.
@@ -610,7 +620,9 @@ struct BlockBasedTable::Rep {
         file_size(_file_size),
         level(_level),
         immortal_table(_immortal_table),
-        user_defined_timestamps_persisted(_user_defined_timestamps_persisted) {}
+        user_defined_timestamps_persisted(_user_defined_timestamps_persisted),
+        fs_prefetch_support(CheckFSFeatureSupport(
+            _ioptions.fs.get(), FSSupportedOps::kFSPrefetch)) {}
   ~Rep() { status.PermitUncheckedError(); }
   const ImmutableOptions& ioptions;
   const EnvOptions& env_options;
@@ -682,6 +694,13 @@ struct BlockBasedTable::Rep {
   bool index_key_includes_seq = true;
   bool index_value_is_full = true;
 
+  // Restart intervals read from table properties (0 if not available)
+  uint32_t data_block_restart_interval = 0;
+  uint32_t index_block_restart_interval = 0;
+
+  // If true, then data blocks have keys and values separated.
+  bool separate_key_value_in_data_block = false;
+
   // Whether block checksums in metadata blocks were verified on open.
   // This is only to mostly maintain current dubious behavior of VerifyChecksum
   // with respect to index blocks, but only when the checksum was previously
@@ -698,6 +717,8 @@ struct BlockBasedTable::Rep {
   // partitioned filters), the `first_internal_key` in `IndexValue`, the
   // `end_key` for range deletion entries.
   const bool user_defined_timestamps_persisted;
+
+  const bool fs_prefetch_support;
 
   // Set to >0 when the file is known to be obsolete and should have its block
   // cache entries evicted on close. NOTE: when the file becomes obsolete,

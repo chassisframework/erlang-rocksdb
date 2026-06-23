@@ -47,6 +47,7 @@
 #include "options/cf_options.h"
 #include "port/port.h"
 #include "port/stack_trace.h"
+#include "rocksdb/advanced_compression.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/convenience.h"
 #include "rocksdb/db.h"
@@ -93,6 +94,7 @@
 #include "utilities/merge_operators/bytesxor.h"
 #include "utilities/merge_operators/sortlist.h"
 #include "utilities/persistent_cache/block_cache_tier.h"
+#include "utilities/trie_index/trie_index_factory.h"
 #ifdef MEMKIND
 #include "memory/memkind_kmem_allocator.h"
 #endif
@@ -159,6 +161,7 @@ DEFINE_string(
     "readrandomoperands,"
     "backup,"
     "restore,"
+    "openandcompact,"
     "approximatememtablestats",
 
     "Comma-separated list of operations to run in the specified"
@@ -230,6 +233,9 @@ DEFINE_string(
     "\tcompact1  -- compact L1 into L2\n"
     "\twaitforcompaction - pause until compaction is (probably) done\n"
     "\tflush - flush the memtable\n"
+    "\topenandcompact -- Open DB and compact all files to bottommost level, "
+    "writing output to separate directory without modifying source DB. "
+    "Designed for remote compaction service testing\n"
     "\tstats       -- Print DB stats\n"
     "\tresetstats  -- Reset DB stats\n"
     "\tlevelstats  -- Print the number of files and bytes per level\n"
@@ -442,6 +448,18 @@ DEFINE_int64(db_write_buffer_size,
              ROCKSDB_NAMESPACE::Options().db_write_buffer_size,
              "Number of bytes to buffer in all memtables before compacting");
 
+DEFINE_int64(max_manifest_file_size,
+             ROCKSDB_NAMESPACE::Options().max_manifest_file_size,
+             "Max manifest file size (or minimum max with auto-tuning)");
+
+DEFINE_int32(max_manifest_space_amp_pct,
+             ROCKSDB_NAMESPACE::Options().max_manifest_space_amp_pct,
+             "Max manifest space amp percentage for auto-tuning");
+
+DEFINE_bool(verify_manifest_content_on_close,
+            ROCKSDB_NAMESPACE::Options().verify_manifest_content_on_close,
+            "If true, verify MANIFEST content (CRC + decode) on DB close");
+
 DEFINE_bool(cost_write_buffer_to_cache, false,
             "The usage of memtable is costed to the block cache");
 
@@ -575,7 +593,7 @@ DEFINE_double(cache_high_pri_pool_ratio, 0.0,
 DEFINE_double(cache_low_pri_pool_ratio, 0.0,
               "Ratio of block cache reserve for low pri blocks.");
 
-DEFINE_string(cache_type, "lru_cache", "Type of block cache.");
+DEFINE_string(cache_type, "hyper_clock_cache", "Type of block cache.");
 
 DEFINE_bool(use_compressed_secondary_cache, false,
             "Use the CompressedSecondaryCache as the secondary cache.");
@@ -613,14 +631,6 @@ DEFINE_int32(compressed_secondary_cache_compression_level,
              "dependent. If unset, we try to use the default for the library "
              "specified in `--compressed_secondary_cache_compression_type`");
 
-DEFINE_uint32(
-    compressed_secondary_cache_compress_format_version, 2,
-    "compress_format_version can have two values: "
-    "compress_format_version == 1 -- decompressed size is not included"
-    " in the block header."
-    "compress_format_version == 2 -- decompressed size is included"
-    " in the block header in varint32 format.");
-
 DEFINE_bool(use_tiered_cache, false,
             "If use_compressed_secondary_cache is true and "
             "use_tiered_volatile_cache is true, then allocate a tiered cache "
@@ -656,6 +666,12 @@ DEFINE_bool(partition_index_and_filters, false,
 DEFINE_bool(partition_index, false, "Partition index blocks");
 
 DEFINE_bool(index_with_first_key, false, "Include first key in the index");
+
+DEFINE_bool(use_trie_index, false,
+            "Use trie-based user-defined index (UDI) for block-based tables. "
+            "Builds a LOUDS-encoded succinct trie from separator keys, "
+            "providing space reduction compared to the default binary search "
+            "index. Requires BytewiseComparator.");
 
 DEFINE_bool(
     optimize_filters_for_memory,
@@ -717,9 +733,25 @@ DEFINE_bool(block_align,
             ROCKSDB_NAMESPACE::BlockBasedTableOptions().block_align,
             "Align data blocks on page size");
 
+DEFINE_uint64(
+    super_block_alignment_size,
+    ROCKSDB_NAMESPACE::BlockBasedTableOptions().super_block_alignment_size,
+    "Configure super block size");
+
+DEFINE_uint64(super_block_alignment_space_overhead_ratio,
+              ROCKSDB_NAMESPACE::BlockBasedTableOptions()
+                  .super_block_alignment_space_overhead_ratio,
+              "Configure space overhead for super block alignment");
+
+DEFINE_bool(separate_key_value_in_data_block,
+            ROCKSDB_NAMESPACE::BlockBasedTableOptions()
+                .separate_key_value_in_data_block,
+            "If true, data blocks store keys and values separately.");
+
 DEFINE_int64(prepopulate_block_cache, 0,
-             "Pre-populate hot/warm blocks in block cache. 0 to disable and 1 "
-             "to insert during flush");
+             "Pre-populate hot/warm blocks in block cache. 0 to disable, 1 "
+             "to insert during flush, and 2 to insert during flush and "
+             "compaction");
 
 DEFINE_uint32(uncache_aggressiveness,
               ROCKSDB_NAMESPACE::ColumnFamilyOptions().uncache_aggressiveness,
@@ -736,6 +768,11 @@ DEFINE_double(data_block_hash_table_util_ratio, 0.75,
               "util ratio for data block hash index table. "
               "This is only valid if use_data_block_hash_index is "
               "set to true");
+
+DEFINE_double(uniform_cv_threshold,
+              ROCKSDB_NAMESPACE::BlockBasedTableOptions().uniform_cv_threshold,
+              "Coefficient of variation threshold for determining if keys in "
+              "an index block are uniformly distributed.");
 
 DEFINE_int64(compressed_cache_size, -1,
              "Number of bytes to use as a cache of compressed data.");
@@ -775,6 +812,8 @@ DEFINE_bool(memtable_whole_key_filtering, false,
             "Try to use whole key bloom filter in memtables.");
 DEFINE_bool(memtable_use_huge_page, false,
             "Try to use huge page in memtables.");
+DEFINE_bool(memtable_batch_lookup_optimization, false,
+            "Use batch lookup optimization for memtable MultiGet.");
 
 DEFINE_bool(whole_key_filtering,
             ROCKSDB_NAMESPACE::BlockBasedTableOptions().whole_key_filtering,
@@ -1019,6 +1058,14 @@ DEFINE_uint64(fifo_compaction_ttl, 0, "TTL for the SST Files in seconds.");
 
 DEFINE_uint64(fifo_age_for_warm, 0, "age_for_warm for FIFO compaction.");
 
+DEFINE_uint64(fifo_compaction_max_data_files_size_mb, 0,
+              "Combined SST + blob file size limit for FIFO compaction "
+              "trimming. 0 means use max_table_files_size (SST-only).");
+
+DEFINE_bool(fifo_compaction_use_kv_ratio_compaction, false,
+            "Enable capacity-derived intra-L0 compaction for FIFO with "
+            "BlobDB. Requires fifo_compaction_max_data_files_size_mb > 0.");
+
 // Stacked BlobDB Options
 DEFINE_bool(use_blob_db, false, "[Stacked BlobDB] Open a BlobDB instance.");
 
@@ -1026,15 +1073,6 @@ DEFINE_bool(
     blob_db_enable_gc,
     ROCKSDB_NAMESPACE::blob_db::BlobDBOptions().enable_garbage_collection,
     "[Stacked BlobDB] Enable BlobDB garbage collection.");
-
-DEFINE_double(
-    blob_db_gc_cutoff,
-    ROCKSDB_NAMESPACE::blob_db::BlobDBOptions().garbage_collection_cutoff,
-    "[Stacked BlobDB] Cutoff ratio for BlobDB garbage collection.");
-
-DEFINE_bool(blob_db_is_fifo,
-            ROCKSDB_NAMESPACE::blob_db::BlobDBOptions().is_fifo,
-            "[Stacked BlobDB] Enable FIFO eviction strategy in BlobDB.");
 
 DEFINE_uint64(blob_db_max_db_size,
               ROCKSDB_NAMESPACE::blob_db::BlobDBOptions().max_db_size,
@@ -1050,25 +1088,9 @@ DEFINE_uint64(
     ROCKSDB_NAMESPACE::blob_db::BlobDBOptions().ttl_range_secs,
     "[Stacked BlobDB] TTL bucket size to use when creating blob files.");
 
-DEFINE_uint64(
-    blob_db_min_blob_size,
-    ROCKSDB_NAMESPACE::blob_db::BlobDBOptions().min_blob_size,
-    "[Stacked BlobDB] Smallest blob to store in a file. Blobs "
-    "smaller than this will be inlined with the key in the LSM tree.");
-
-DEFINE_uint64(blob_db_bytes_per_sync,
-              ROCKSDB_NAMESPACE::blob_db::BlobDBOptions().bytes_per_sync,
-              "[Stacked BlobDB] Bytes to sync blob file at.");
-
 DEFINE_uint64(blob_db_file_size,
               ROCKSDB_NAMESPACE::blob_db::BlobDBOptions().blob_file_size,
               "[Stacked BlobDB] Target size of each blob file.");
-
-DEFINE_string(
-    blob_db_compression_type, "snappy",
-    "[Stacked BlobDB] Algorithm to use to compress blobs in blob files.");
-static enum ROCKSDB_NAMESPACE::CompressionType
-    FLAGS_blob_db_compression_type_e = ROCKSDB_NAMESPACE::kSnappyCompression;
 
 // Integrated BlobDB options
 DEFINE_bool(
@@ -1632,6 +1654,12 @@ DEFINE_bool(print_malloc_stats, false,
 
 DEFINE_bool(disable_auto_compactions, false, "Do not auto trigger compactions");
 
+DEFINE_bool(open_files_async, false,
+            "Open SST files asynchronously during DB open");
+
+DEFINE_bool(skip_stats_update_on_db_open, false,
+            "Skip loading table properties to update stats during DB open");
+
 DEFINE_uint64(wal_ttl_seconds, 0, "Set the TTL for the WAL Files in seconds.");
 DEFINE_uint64(wal_size_limit_MB, 0,
               "Set the size limit for the WAL Files in MB.");
@@ -1770,6 +1798,9 @@ DEFINE_double(cuckoo_hash_ratio, 0.9, "Hash ratio for Cuckoo SST table.");
 DEFINE_bool(use_hash_search, false,
             "if use kHashSearch instead of kBinarySearch. "
             "This is valid if only we use BlockTable");
+DEFINE_string(index_block_search_type, "binary_search",
+              "Search algorithm for reading index blocks: binary_search, "
+              "interpolation_search, or auto_search.");
 DEFINE_string(merge_operator, "",
               "The merge operator to use with the database."
               "If a new merge operator is specified, be sure to use fresh"
@@ -1861,6 +1892,18 @@ DEFINE_bool(
     ROCKSDB_NAMESPACE::MultiScanArgs(ROCKSDB_NAMESPACE::BytewiseComparator())
         .use_async_io,
     "Sets MultiScanArgs::use_async_io");
+
+DEFINE_bool(openandcompact_allow_resumption, false,
+            "Whether to keep existing progress and enable resume compaction in "
+            "OpenAndCompact benchmark");
+
+DEFINE_bool(openandcompact_test_cancel_on_odd, false,
+            "During OpenAndCompact[Xn], odd runs gets cancelled "
+            "after specified `openandcompact_cancel_after_millseconds`");
+
+DEFINE_uint32(openandcompact_cancel_after_millseconds, 1,
+              "Time to wait before cancelling compaction in odd runs when "
+              "openandcompact_test_cancel_on_odd is true");
 
 namespace ROCKSDB_NAMESPACE {
 namespace {
@@ -2045,6 +2088,7 @@ static void AppendWithSpace(std::string* str, Slice msg) {
 
 struct DBWithColumnFamilies {
   std::vector<ColumnFamilyHandle*> cfh;
+  std::unique_ptr<DB> db_owner;
   DB* db;
   OptimisticTransactionDB* opt_txn_db;
   std::atomic<size_t> num_created;  // Need to be updated after all the
@@ -2074,13 +2118,9 @@ struct DBWithColumnFamilies {
     std::for_each(cfh.begin(), cfh.end(),
                   [](ColumnFamilyHandle* cfhi) { delete cfhi; });
     cfh.clear();
-    if (opt_txn_db) {
-      delete opt_txn_db;
-      opt_txn_db = nullptr;
-    } else {
-      delete db;
-      db = nullptr;
-    }
+    db_owner.reset();
+    db = nullptr;
+    opt_txn_db = nullptr;
   }
 
   ColumnFamilyHandle* GetCfh(int64_t rand_num) {
@@ -2615,24 +2655,33 @@ class CombinedStats {
     const char* name = bench_name.c_str();
     int num_runs = static_cast<int>(throughput_ops_.size());
 
+    double avg_ops_per_sec = CalcAvg(throughput_ops_);
+    double avg_millis_per_op =
+        (avg_ops_per_sec > 0) ? (1000.0 / avg_ops_per_sec) : 0;
+
+    printf("\n");
+
     if (throughput_mbs_.size() == throughput_ops_.size()) {
       // \xC2\xB1 is +/- character in UTF-8
       fprintf(stdout,
-              "%s [AVG    %d runs] : %d (\xC2\xB1 %d) ops/sec; %6.1f (\xC2\xB1 "
+              "%s [AVG    %d runs] : %d (\xC2\xB1 %d) ops/sec; %.3f ms/op; "
+              "%6.1f (\xC2\xB1 "
               "%.1f) MB/sec\n"
               "%s [MEDIAN %d runs] : %d ops/sec; %6.1f MB/sec\n",
               name, num_runs, static_cast<int>(CalcAvg(throughput_ops_)),
               static_cast<int>(CalcConfidence95(throughput_ops_)),
-              CalcAvg(throughput_mbs_), CalcConfidence95(throughput_mbs_), name,
-              num_runs, static_cast<int>(CalcMedian(throughput_ops_)),
+              avg_millis_per_op, CalcAvg(throughput_mbs_),
+              CalcConfidence95(throughput_mbs_), name, num_runs,
+              static_cast<int>(CalcMedian(throughput_ops_)),
               CalcMedian(throughput_mbs_));
     } else {
       fprintf(stdout,
-              "%s [AVG    %d runs] : %d (\xC2\xB1 %d) ops/sec\n"
+              "%s [AVG    %d runs] : %d (\xC2\xB1 %d) ops/sec; %.3f ms/op\n"
               "%s [MEDIAN %d runs] : %d ops/sec\n",
               name, num_runs, static_cast<int>(CalcAvg(throughput_ops_)),
-              static_cast<int>(CalcConfidence95(throughput_ops_)), name,
-              num_runs, static_cast<int>(CalcMedian(throughput_ops_)));
+              static_cast<int>(CalcConfidence95(throughput_ops_)),
+              avg_millis_per_op, name, num_runs,
+              static_cast<int>(CalcMedian(throughput_ops_)));
     }
   }
 
@@ -2791,6 +2840,8 @@ class Duration {
   uint64_t start_at_;
 };
 
+// Global run counter for cancel/resume-OpenAndCompact() testing
+static std::atomic<int> openandcompact_run_counter{0};
 class Benchmark {
  private:
   std::shared_ptr<Cache> cache_;
@@ -2811,6 +2862,7 @@ class Benchmark {
   int64_t max_num_range_tombstones_;
   ReadOptions read_options_;
   WriteOptions write_options_;
+  std::shared_ptr<ROCKSDB_NAMESPACE::UserDefinedIndexFactory> udi_factory_;
   Options open_options_;  // keep options around to properly destroy db later
   TraceOptions trace_options_;
   TraceOptions block_cache_trace_options_;
@@ -2885,12 +2937,18 @@ class Benchmark {
     return true;
   }
 
-  inline bool CompressSlice(const CompressionInfo& compression_info,
-                            const Slice& input, std::string* compressed) {
-    constexpr uint32_t compress_format_version = 2;
-
-    return OLD_CompressData(input, compression_info, compress_format_version,
-                            compressed);
+  std::unique_ptr<Compressor> GetCompressor() {
+    CompressionOptions opts;
+    opts.level = FLAGS_compression_level;
+    // TODO: inter-operate with FLAGS_compression_manager
+    auto compressor = GetBuiltinV2CompressionManager()->GetCompressor(
+        opts, FLAGS_compression_type_e);
+    if (compressor &&
+        compressor->GetPreferredCompressionType() != FLAGS_compression_type_e) {
+      // For benchmarking, don't fall back on a different compression type
+      compressor.reset();
+    }
+    return compressor;
   }
 
   void PrintHeader(const Options& options) {
@@ -2976,18 +3034,30 @@ class Benchmark {
       // The test string should not be too small.
       const int len = FLAGS_block_size;
       std::string input_str(len, 'y');
-      std::string compressed;
-      CompressionOptions opts;
-      CompressionContext context(FLAGS_compression_type_e, opts);
-      CompressionInfo info(opts, context, CompressionDict::GetEmptyDict(),
-                           FLAGS_compression_type_e);
-      bool result = CompressSlice(info, Slice(input_str), &compressed);
-
-      if (!result) {
-        fprintf(stdout, "WARNING: %s compression is not enabled\n",
-                compression);
-      } else if (compressed.size() >= input_str.size()) {
-        fprintf(stdout, "WARNING: %s compression is not effective\n",
+      auto compressor = GetCompressor();
+      if (compressor) {
+        GrowableBuffer compressed;
+        compressed.ResetForSize(input_str.size());
+        CompressionType actual_type = kNoCompression;
+        auto working_area = compressor->ObtainWorkingArea();
+        Status s = compressor->CompressBlock(
+            Slice(input_str), compressed.data(), &compressed.MutableSize(),
+            &actual_type, &working_area);
+        if (!s.ok()) {
+          fprintf(stdout, "WARNING: compression test run failure: %s\n",
+                  s.ToString().c_str());
+        } else if (actual_type == kNoCompression) {
+          fprintf(stdout,
+                  "WARNING: %s compression is not effective or declined\n",
+                  compression);
+        } else if (actual_type != FLAGS_compression_type_e) {
+          fprintf(
+              stdout,
+              "WARNING: using %s compression in place of %s (unsupported?)\n",
+              CompressionTypeToString(actual_type).c_str(), compression);
+        }
+      } else {
+        fprintf(stdout, "WARNING: %s compression is not available\n",
                 compression);
       }
     }
@@ -3176,8 +3246,6 @@ class Benchmark {
           FLAGS_compressed_secondary_cache_compression_type_e;
       secondary_cache_opts.compression_opts.level =
           FLAGS_compressed_secondary_cache_compression_level;
-      secondary_cache_opts.compress_format_version =
-          FLAGS_compressed_secondary_cache_compress_format_version;
       if (FLAGS_use_tiered_cache) {
         use_tiered_cache = true;
         adm_policy = StringToAdmissionPolicy(FLAGS_tiered_adm_policy.c_str());
@@ -3215,10 +3283,10 @@ class Benchmark {
       db_bench_exit(1);
     } else if (EndsWith(FLAGS_cache_type, "hyper_clock_cache")) {
       size_t estimated_entry_charge;
-      if (FLAGS_cache_type == "fixed_hyper_clock_cache" ||
-          FLAGS_cache_type == "hyper_clock_cache") {
+      if (FLAGS_cache_type == "fixed_hyper_clock_cache") {
         estimated_entry_charge = FLAGS_block_size;
-      } else if (FLAGS_cache_type == "auto_hyper_clock_cache") {
+      } else if (FLAGS_cache_type == "auto_hyper_clock_cache" ||
+                 FLAGS_cache_type == "hyper_clock_cache") {
         estimated_entry_charge = 0;
       } else {
         fprintf(stderr, "Cache type not supported.");
@@ -3372,8 +3440,8 @@ class Benchmark {
 
   void DeleteDBs() {
     db_.DeleteDBs();
-    for (const DBWithColumnFamilies& dbwcf : multi_dbs_) {
-      delete dbwcf.db;
+    for (auto& dbwcf : multi_dbs_) {
+      dbwcf.DeleteDBs();
     }
   }
 
@@ -3478,11 +3546,13 @@ class Benchmark {
 
   void VerifyDBFromDB(std::string& truth_db_name) {
     DBWithColumnFamilies truth_db;
-    auto s = DB::OpenForReadOnly(open_options_, truth_db_name, &truth_db.db);
+    auto s =
+        DB::OpenForReadOnly(open_options_, truth_db_name, &truth_db.db_owner);
     if (!s.ok()) {
       fprintf(stderr, "open error: %s\n", s.ToString().c_str());
       db_bench_exit(1);
     }
+    truth_db.db = truth_db.db_owner.get();
     ReadOptions ro;
     ro.total_order_seek = true;
     std::unique_ptr<Iterator> truth_iter(truth_db.db->NewIterator(ro));
@@ -3557,6 +3627,9 @@ class Benchmark {
       read_options_.auto_readahead_size = FLAGS_auto_readahead_size;
       read_options_.auto_refresh_iterator_with_snapshot =
           FLAGS_auto_refresh_iterator_with_snapshot;
+      if (FLAGS_use_trie_index && udi_factory_) {
+        read_options_.table_index_factory = udi_factory_.get();
+      }
 
       void (Benchmark::*method)(ThreadState*) = nullptr;
       void (Benchmark::*post_process_method)() = nullptr;
@@ -3843,6 +3916,9 @@ class Benchmark {
         method = &Benchmark::Backup;
       } else if (name == "restore") {
         method = &Benchmark::Restore;
+      } else if (name == "openandcompact") {
+        fresh_db = false;
+        method = &Benchmark::OpenAndCompact;
       } else if (!name.empty()) {  // No error message for empty name
         fprintf(stderr, "unknown benchmark '%s'\n", name.c_str());
         ErrorExit();
@@ -3860,7 +3936,7 @@ class Benchmark {
           }
           Options options = open_options_;
           for (size_t i = 0; i < multi_dbs_.size(); i++) {
-            delete multi_dbs_[i].db;
+            multi_dbs_[i].DeleteDBs();
             if (!open_options_.wal_dir.empty()) {
               options.wal_dir = GetPathForMultiple(open_options_.wal_dir, i);
             }
@@ -4200,24 +4276,37 @@ class Benchmark {
     Slice input = gen.Generate(FLAGS_block_size);
     int64_t bytes = 0;
     int64_t produced = 0;
-    bool ok = true;
-    std::string compressed;
-    CompressionOptions opts;
-    opts.level = FLAGS_compression_level;
-    CompressionContext context(FLAGS_compression_type_e, opts);
-    CompressionInfo info(opts, context, CompressionDict::GetEmptyDict(),
-                         FLAGS_compression_type_e);
+    Status s;
+
+    auto compressor = GetCompressor();
+    if (!compressor) {
+      thread->stats.AddMessage("(compression type not supported)");
+      return;
+    }
+    auto working_area = compressor->ObtainWorkingArea();
+
+    GrowableBuffer compressed;
     // Compress 1G
-    while (ok && bytes < int64_t(1) << 30) {
-      compressed.clear();
-      ok = CompressSlice(info, input, &compressed);
+    while (bytes < int64_t(1) << 30) {
+      compressed.ResetForSize(input.size());
+      CompressionType actual_type = kNoCompression;
+      s = compressor->CompressBlock(input, compressed.data(),
+                                    &compressed.MutableSize(), &actual_type,
+                                    &working_area);
+      if (UNLIKELY(!s.ok())) {
+        break;
+      }
+      if (UNLIKELY(actual_type == kNoCompression)) {
+        s = Status::Aborted("Unable to compress smaller than input");
+        break;
+      }
       produced += compressed.size();
       bytes += input.size();
       thread->stats.FinishedOps(nullptr, nullptr, 1, kCompress);
     }
 
-    if (!ok) {
-      thread->stats.AddMessage("(compression failure)");
+    if (!s.ok()) {
+      thread->stats.AddMessage("(compression failure: " + s.ToString() + ")");
     } else {
       char buf[340];
       snprintf(buf, sizeof(buf), "(output: %.1f%%)",
@@ -4230,37 +4319,59 @@ class Benchmark {
   void Uncompress(ThreadState* thread) {
     RandomGenerator gen;
     Slice input = gen.Generate(FLAGS_block_size);
-    std::string compressed;
 
-    CompressionOptions compression_opts;
-    compression_opts.level = FLAGS_compression_level;
-    CompressionContext compression_ctx(FLAGS_compression_type_e,
-                                       compression_opts);
-    CompressionInfo compression_info(compression_opts, compression_ctx,
-                                     CompressionDict::GetEmptyDict(),
-                                     FLAGS_compression_type_e);
-    UncompressionContext uncompression_ctx(FLAGS_compression_type_e);
-    UncompressionInfo uncompression_info(uncompression_ctx,
-                                         UncompressionDict::GetEmptyDict(),
-                                         FLAGS_compression_type_e);
+    auto compressor = GetCompressor();
+    if (!compressor) {
+      thread->stats.AddMessage("(compression type not supported)");
+      return;
+    }
 
-    bool ok = CompressSlice(compression_info, input, &compressed);
+    // Compress the input first
+    GrowableBuffer compressed;
+    compressed.ResetForSize(input.size());
+    CompressionType actual_type = kNoCompression;
+    Status s = compressor->CompressBlock(
+        input, compressed.data(), &compressed.MutableSize(), &actual_type,
+        /*working_area=*/nullptr);
+    if (!s.ok()) {
+      thread->stats.AddMessage("(compression failure: " + s.ToString() + ")");
+      return;
+    }
+    if (actual_type != FLAGS_compression_type_e) {
+      thread->stats.AddMessage("(failed to compress smaller than input)");
+      return;
+    }
+
+    // TODO: inter-operate with FLAGS_compression_manager
+    auto decompressor =
+        GetBuiltinV2CompressionManager()->GetDecompressorOptimizeFor(
+            actual_type);
+    auto decomp_working_area = decompressor->ObtainWorkingArea(actual_type);
+
     int64_t bytes = 0;
-    size_t uncompressed_size = 0;
-    while (ok && bytes < 1024 * 1048576) {
-      constexpr uint32_t compress_format_version = 2;
+    while (bytes < 1024 * 1048576) {
+      Decompressor::Args args;
+      args.compression_type = actual_type;
+      args.compressed_data = compressed.AsSlice();
+      args.working_area = &decomp_working_area;
 
-      CacheAllocationPtr uncompressed = OLD_UncompressData(
-          uncompression_info, compressed.data(), compressed.size(),
-          &uncompressed_size, compress_format_version);
+      s = decompressor->ExtractUncompressedSize(args);
+      if (UNLIKELY(!s.ok())) {
+        break;
+      }
 
-      ok = uncompressed.get() != nullptr;
+      CacheAllocationPtr uncompressed = AllocateBlock(args.uncompressed_size,
+                                                      /*allocator=*/nullptr);
+      s = decompressor->DecompressBlock(args, uncompressed.get());
+      if (UNLIKELY(!s.ok())) {
+        break;
+      }
       bytes += input.size();
       thread->stats.FinishedOps(nullptr, nullptr, 1, kUncompress);
     }
 
-    if (!ok) {
-      thread->stats.AddMessage("(compression failure)");
+    if (!s.ok()) {
+      thread->stats.AddMessage("(decompression failure: " + s.ToString() + ")");
     } else {
       thread->stats.AddBytes(bytes);
     }
@@ -4328,6 +4439,10 @@ class Benchmark {
       options.write_buffer_manager.reset(
           new WriteBufferManager(FLAGS_db_write_buffer_size, cache_));
     }
+    options.max_manifest_file_size = FLAGS_max_manifest_file_size;
+    options.max_manifest_space_amp_pct = FLAGS_max_manifest_space_amp_pct;
+    options.verify_manifest_content_on_close =
+        FLAGS_verify_manifest_content_on_close;
     options.arena_block_size = FLAGS_arena_block_size;
     options.write_buffer_size = FLAGS_write_buffer_size;
     options.max_write_buffer_number = FLAGS_max_write_buffer_number;
@@ -4353,6 +4468,10 @@ class Benchmark {
         FLAGS_fifo_compaction_max_table_files_size_mb * 1024 * 1024,
         FLAGS_fifo_compaction_allow_compaction);
     options.compaction_options_fifo.age_for_warm = FLAGS_fifo_age_for_warm;
+    options.compaction_options_fifo.max_data_files_size =
+        FLAGS_fifo_compaction_max_data_files_size_mb * 1024 * 1024;
+    options.compaction_options_fifo.use_kv_ratio_compaction =
+        FLAGS_fifo_compaction_use_kv_ratio_compaction;
     options.prefix_extractor = prefix_extractor_;
     if (FLAGS_use_uint64_comparator) {
       options.comparator = test::Uint64Comparator();
@@ -4367,6 +4486,8 @@ class Benchmark {
     options.memtable_huge_page_size = FLAGS_memtable_use_huge_page ? 2048 : 0;
     options.memtable_prefix_bloom_size_ratio = FLAGS_memtable_bloom_size_ratio;
     options.memtable_whole_key_filtering = FLAGS_memtable_whole_key_filtering;
+    options.memtable_batch_lookup_optimization =
+        FLAGS_memtable_batch_lookup_optimization;
     if (FLAGS_memtable_insert_with_hint_prefix_size > 0) {
       options.memtable_insert_with_hint_prefix_extractor.reset(
           NewCappedPrefixTransform(
@@ -4448,6 +4569,21 @@ class Benchmark {
         block_based_options.index_type = BlockBasedTableOptions::kHashSearch;
       } else {
         block_based_options.index_type = BlockBasedTableOptions::kBinarySearch;
+      }
+
+      if (FLAGS_index_block_search_type == "binary_search") {
+        block_based_options.index_block_search_type =
+            BlockBasedTableOptions::kBinary;
+      } else if (FLAGS_index_block_search_type == "interpolation_search") {
+        block_based_options.index_block_search_type =
+            BlockBasedTableOptions::kInterpolation;
+      } else if (FLAGS_index_block_search_type == "auto_search") {
+        block_based_options.index_block_search_type =
+            BlockBasedTableOptions::kAuto;
+      } else {
+        fprintf(stderr, "Unknown index_block_search_type: %s\n",
+                FLAGS_index_block_search_type.c_str());
+        db_bench_exit(1);
       }
       block_based_options.decouple_partitioned_filters =
           FLAGS_decouple_partitioned_filters;
@@ -4549,6 +4685,9 @@ class Benchmark {
       block_based_options.enable_index_compression =
           FLAGS_enable_index_compression;
       block_based_options.block_align = FLAGS_block_align;
+      block_based_options.separate_key_value_in_data_block =
+          FLAGS_separate_key_value_in_data_block;
+      block_based_options.uniform_cv_threshold = FLAGS_uniform_cv_threshold;
       block_based_options.whole_key_filtering = FLAGS_whole_key_filtering;
       block_based_options.max_auto_readahead_size =
           FLAGS_max_auto_readahead_size;
@@ -4567,6 +4706,10 @@ class Benchmark {
         case 1:
           prepopulate_block_cache =
               BlockBasedTableOptions::PrepopulateBlockCache::kFlushOnly;
+          break;
+        case 2:
+          prepopulate_block_cache = BlockBasedTableOptions::
+              PrepopulateBlockCache::kFlushAndCompaction;
           break;
         default:
           fprintf(stderr, "Unknown prepopulate block cache mode\n");
@@ -4662,6 +4805,11 @@ class Benchmark {
         fprintf(stdout, "Integrated BlobDB: blob cache disabled\n");
       }
 
+      if (FLAGS_use_trie_index) {
+        udi_factory_ = std::make_shared<trie_index::TrieIndexFactory>();
+        block_based_options.user_defined_index_factory = udi_factory_;
+      }
+
       options.table_factory.reset(
           NewBlockBasedTableFactory(block_based_options));
     }
@@ -4752,6 +4900,14 @@ class Benchmark {
     options.table_cache_numshardbits = FLAGS_table_cache_numshardbits;
     options.max_compaction_bytes = FLAGS_max_compaction_bytes;
     options.disable_auto_compactions = FLAGS_disable_auto_compactions;
+    options.open_files_async = FLAGS_open_files_async;
+    if (FLAGS_open_files_async && !FLAGS_skip_stats_update_on_db_open) {
+      FLAGS_skip_stats_update_on_db_open = true;
+      fprintf(stderr,
+              "open_files_async requires skip_stats_update_on_db_open, "
+              "enabling it automatically\n");
+    }
+    options.skip_stats_update_on_db_open = FLAGS_skip_stats_update_on_db_open;
     options.optimize_filters_for_hits = FLAGS_optimize_filters_for_hits;
     options.paranoid_checks = FLAGS_paranoid_checks;
     options.force_consistency_checks = FLAGS_force_consistency_checks;
@@ -5040,11 +5196,15 @@ class Benchmark {
       }
       if (FLAGS_readonly) {
         s = hooks.OpenForReadOnly(options, db_name, column_families, &db->cfh,
-                                  &db->db);
+                                  &db->db_owner);
+        if (s.ok()) {
+          db->db = db->db_owner.get();
+        }
       } else if (FLAGS_optimistic_transaction_db) {
         s = hooks.OpenOptimisticTransactionDB(options, db_name, column_families,
                                               &db->cfh, &db->opt_txn_db);
         if (s.ok()) {
+          db->db_owner.reset(db->opt_txn_db);
           db->db = db->opt_txn_db->GetBaseDB();
         }
       } else if (FLAGS_transaction_db) {
@@ -5058,20 +5218,29 @@ class Benchmark {
         s = hooks.OpenTransactionDB(options, txn_db_options, db_name,
                                     column_families, &db->cfh, &ptr);
         if (s.ok()) {
+          db->db_owner.reset(ptr);
           db->db = ptr;
         }
       } else {
-        s = hooks.Open(options, db_name, column_families, &db->cfh, &db->db);
+        s = hooks.Open(options, db_name, column_families, &db->cfh,
+                       &db->db_owner);
+        if (s.ok()) {
+          db->db = db->db_owner.get();
+        }
       }
       db->cfh.resize(FLAGS_num_column_families);
       db->num_created = num_hot;
       db->num_hot = num_hot;
       db->cfh_idx_to_prob = std::move(cfh_idx_to_prob);
     } else if (FLAGS_readonly) {
-      s = hooks.OpenForReadOnly(options, db_name, &db->db, false);
+      s = hooks.OpenForReadOnly(options, db_name, &db->db_owner, false);
+      if (s.ok()) {
+        db->db = db->db_owner.get();
+      }
     } else if (FLAGS_optimistic_transaction_db) {
       s = hooks.OpenOptimisticTransactionDB(options, db_name, &db->opt_txn_db);
       if (s.ok()) {
+        db->db_owner.reset(db->opt_txn_db);
         db->db = db->opt_txn_db->GetBaseDB();
       }
     } else if (FLAGS_transaction_db) {
@@ -5087,23 +5256,20 @@ class Benchmark {
         s = hooks.OpenTransactionDB(options, txn_db_options, db_name, &ptr);
       }
       if (s.ok()) {
+        db->db_owner.reset(ptr);
         db->db = ptr;
       }
     } else if (FLAGS_use_blob_db) {
       // Stacked BlobDB
       blob_db::BlobDBOptions blob_db_options;
       blob_db_options.enable_garbage_collection = FLAGS_blob_db_enable_gc;
-      blob_db_options.garbage_collection_cutoff = FLAGS_blob_db_gc_cutoff;
-      blob_db_options.is_fifo = FLAGS_blob_db_is_fifo;
       blob_db_options.max_db_size = FLAGS_blob_db_max_db_size;
       blob_db_options.ttl_range_secs = FLAGS_blob_db_ttl_range_secs;
-      blob_db_options.min_blob_size = FLAGS_blob_db_min_blob_size;
-      blob_db_options.bytes_per_sync = FLAGS_blob_db_bytes_per_sync;
       blob_db_options.blob_file_size = FLAGS_blob_db_file_size;
-      blob_db_options.compression = FLAGS_blob_db_compression_type_e;
       blob_db::BlobDB* ptr = nullptr;
       s = hooks.Open(options, blob_db_options, db_name, &ptr);
       if (s.ok()) {
+        db->db_owner.reset(ptr);
         db->db = ptr;
       }
     } else if (FLAGS_use_secondary_db) {
@@ -5114,7 +5280,10 @@ class Benchmark {
         FLAGS_secondary_path = default_secondary_path;
       }
       s = hooks.OpenAsSecondary(options, db_name, FLAGS_secondary_path,
-                                &db->db);
+                                &db->db_owner);
+      if (s.ok()) {
+        db->db = db->db_owner.get();
+      }
       if (s.ok() && FLAGS_secondary_update_interval > 0) {
         secondary_update_thread_.reset(new port::Thread(
             [this](int interval, DBWithColumnFamilies* _db) {
@@ -5134,13 +5303,16 @@ class Benchmark {
             FLAGS_secondary_update_interval, db));
       }
     } else if (FLAGS_open_as_follower) {
-      std::unique_ptr<DB> dbptr;
-      s = hooks.OpenAsFollower(options, db_name, FLAGS_leader_path, &dbptr);
+      s = hooks.OpenAsFollower(options, db_name, FLAGS_leader_path,
+                               &db->db_owner);
       if (s.ok()) {
-        db->db = dbptr.release();
+        db->db = db->db_owner.get();
       }
     } else {
-      s = hooks.Open(options, db_name, &db->db);
+      s = hooks.Open(options, db_name, &db->db_owner);
+      if (s.ok()) {
+        db->db = db->db_owner.get();
+      }
     }
     if (FLAGS_report_open_timing) {
       std::cout << "OpenDb:     "
@@ -5170,6 +5342,206 @@ class Benchmark {
 
   void WriteUniqueRandom(ThreadState* thread) {
     DoWrite(thread, UNIQUE_RANDOM);
+  }
+
+  void OpenAndCompact(ThreadState* thread) {
+    if (thread->tid != 0) {
+      return;
+    }
+
+    int current_run = ++openandcompact_run_counter;
+    bool is_odd_run = (current_run % 2 == 1);
+
+    if (FLAGS_openandcompact_test_cancel_on_odd) {
+      const char* even_description = FLAGS_openandcompact_allow_resumption
+                                         ? "even - resume"
+                                         : "even - normal";
+      fprintf(stdout, "\n--- Run %d (%s) ---\n", current_run,
+              is_odd_run ? "odd - will cancel" : even_description);
+    }
+
+    Status create_status =
+        db_.db->GetEnv()->CreateDirIfMissing(FLAGS_secondary_path);
+    if (!create_status.ok()) {
+      fprintf(stderr, "Failed to create secondary path: %s\n",
+              create_status.ToString().c_str());
+      return;
+    }
+
+    std::string options_file;
+    Status options_status =
+        GetLatestOptionsFileName(FLAGS_db, db_.db->GetEnv(), &options_file);
+    if (!options_status.ok()) {
+      fprintf(stderr, "FAILED: Cannot find OPTIONS file in %s: %s\n",
+              FLAGS_db.c_str(), options_status.ToString().c_str());
+      return;
+    }
+
+    uint64_t options_file_number;
+    FileType type;
+    if (!ParseFileName(options_file, &options_file_number, &type) ||
+        type != kOptionsFile) {
+      fprintf(stderr, "FAILED: Cannot parse OPTIONS file number from %s\n",
+              options_file.c_str());
+      return;
+    }
+
+    CompactionServiceInput compaction_input;
+    compaction_input.cf_name = kDefaultColumnFamilyName;
+
+    std::vector<std::string> input_file_names;
+    ColumnFamilyMetaData cf_meta;
+    db_.db->GetColumnFamilyMetaData(&cf_meta);
+
+    uint64_t total_input_keys = 0;
+    uint64_t total_input_files = 0;
+
+    // Collect files from all levels for full compaction
+    for (const auto& level : cf_meta.levels) {
+      for (const auto& file : level.files) {
+        input_file_names.push_back(file.name);
+        total_input_keys += file.num_entries;
+        total_input_files++;
+      }
+    }
+
+    // Set output level to configured bottom level (num_levels - 1)
+    compaction_input.output_level = FLAGS_num_levels - 1;
+    compaction_input.db_id = "db_bench_openandcompact";
+    compaction_input.options_file_number = options_file_number;
+
+    compaction_input.input_files = input_file_names;
+
+    std::string input_string;
+    Status serialize_status = compaction_input.Write(&input_string);
+    if (!serialize_status.ok()) {
+      fprintf(stderr, "FAILED: Cannot serialize compaction input: %s\n",
+              serialize_status.ToString().c_str());
+      return;
+    }
+
+    fprintf(stdout, "\nInput files: %" PRIu64 " files, %" PRIu64 " keys\n",
+            total_input_files, total_input_keys);
+
+    std::string output_directory =
+        FLAGS_secondary_path + "/openandcompact_" + std::to_string(thread->tid);
+
+    // Always clean up in odd run, depending on
+    // !FLAGS_openandcompact_allow_resumption in even run
+    bool should_cleanup = is_odd_run || !FLAGS_openandcompact_allow_resumption;
+
+    if (should_cleanup) {
+      std::vector<std::string> children;
+      Status list_status = FLAGS_env->GetChildren(output_directory, &children);
+      if (list_status.ok()) {
+        for (const auto& child : children) {
+          if (child != "." && child != "..") {
+            std::string child_path = output_directory + "/" + child;
+            Status del_status = FLAGS_env->DeleteFile(child_path);
+            if (!del_status.ok()) {
+              fprintf(stderr, "Warning: Failed to delete file %s: %s\n",
+                      child_path.c_str(), del_status.ToString().c_str());
+            }
+          }
+        }
+        Status del_dir_status = FLAGS_env->DeleteDir(output_directory);
+        if (!del_dir_status.ok()) {
+          fprintf(stderr, "Warning: Failed to delete directory %s: %s\n",
+                  output_directory.c_str(), del_dir_status.ToString().c_str());
+        }
+      }
+    }
+
+    Status create_output_status =
+        FLAGS_env->CreateDirIfMissing(output_directory);
+    if (!create_output_status.ok()) {
+      fprintf(stderr, "Failed to create output directory %s: %s\n",
+              output_directory.c_str(),
+              create_output_status.ToString().c_str());
+      return;
+    }
+
+    std::string result_string;
+
+    CompactionServiceOptionsOverride options_override;
+    options_override.env = FLAGS_env;
+    BlockBasedTableOptions table_options;
+    options_override.table_factory.reset(
+        NewBlockBasedTableFactory(table_options));
+
+    OpenAndCompactOptions options;
+    std::atomic<bool> should_cancel{false};
+    options.canceled = &should_cancel;
+    options.allow_resumption = FLAGS_openandcompact_allow_resumption;
+
+    Status s;
+    uint64_t start_time = FLAGS_env->NowMicros();
+    uint64_t end_time = start_time;
+
+    if (FLAGS_openandcompact_test_cancel_on_odd && is_odd_run) {
+      std::thread compaction_thread([&]() {
+        s = DB::OpenAndCompact(options, FLAGS_db, output_directory,
+                               input_string, &result_string, options_override);
+        end_time = FLAGS_env->NowMicros();
+      });
+
+      std::thread cancellation_timer([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(
+            FLAGS_openandcompact_cancel_after_millseconds));
+        should_cancel.store(true);
+      });
+
+      compaction_thread.join();
+      cancellation_timer.join();
+    } else {
+      // Normal synchronous operation for even runs or when test_cancel_on_odd
+      // is false
+      s = DB::OpenAndCompact(options, FLAGS_db, output_directory, input_string,
+                             &result_string, options_override);
+      end_time = FLAGS_env->NowMicros();
+    }
+
+    uint64_t latency_micros = end_time - start_time;
+    double latency_seconds = latency_micros / 1000000.0;
+
+    fprintf(stdout,
+            "OpenAndCompact() API call : %.3f micros/op %.3f seconds/op\n",
+            (double)latency_micros, latency_seconds);
+
+    fprintf(stdout, "OpenAndCompact status: %s\n", s.ToString().c_str());
+
+    if (FLAGS_openandcompact_test_cancel_on_odd && is_odd_run) {
+      if (!s.IsManualCompactionPaused()) {
+        fprintf(stdout, "Fail to cancel compaction");
+      }
+      return;
+    } else if (!s.ok()) {
+      fprintf(stderr, "OpenAndCompact failed: %s\n", s.ToString().c_str());
+      return;
+    }
+
+    CompactionServiceResult compaction_result;
+    Status parse_status =
+        CompactionServiceResult::Read(result_string, &compaction_result);
+    if (parse_status.ok()) {
+      uint64_t total_output_size = 0;
+      for (const auto& output_file : compaction_result.output_files) {
+        total_output_size += output_file.file_size;
+      }
+
+      uint64_t num_output_files = compaction_result.output_files.size();
+      uint64_t avg_output_file_size =
+          num_output_files > 0 ? total_output_size / num_output_files : 0;
+
+      fprintf(stdout,
+              "Output: %" PRIu64 " files, average size: %" PRIu64
+              " bytes (%.2f MB)\n",
+              num_output_files, avg_output_file_size,
+              avg_output_file_size / (1024.0 * 1024.0));
+    } else {
+      fprintf(stderr, "Failed to parse compaction result: %s\n",
+              parse_status.ToString().c_str());
+    }
   }
 
   class KeyGenerator {
@@ -8886,10 +9258,6 @@ int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
 
   FLAGS_compressed_secondary_cache_compression_type_e = StringToCompressionType(
       FLAGS_compressed_secondary_cache_compression_type.c_str());
-
-  // Stacked BlobDB
-  FLAGS_blob_db_compression_type_e =
-      StringToCompressionType(FLAGS_blob_db_compression_type.c_str());
 
   int env_opts = !FLAGS_env_uri.empty() + !FLAGS_fs_uri.empty();
   if (env_opts > 1) {

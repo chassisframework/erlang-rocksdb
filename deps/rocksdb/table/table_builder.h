@@ -164,10 +164,6 @@ struct TableBuilderOptions : public TablePropertiesCollectorFactory::Context {
   const TableFileCreationReason reason;
   // END for FilterBuildingContext
 
-  // XXX: only used by BlockBasedTableBuilder for SstFileWriter. If you
-  // want to skip filters, that should be (for example) null filter_policy
-  // in the table options of the ioptions.table_factory
-  bool skip_filters = false;
   const uint64_t cur_file_num;
 };
 
@@ -224,6 +220,11 @@ class TableBuilder {
   // FileSize() cannot estimate final SST size, e.g. parallel compression
   // is enabled.
   virtual uint64_t EstimatedFileSize() const { return FileSize(); }
+
+  // Estimated tail size of the SST file generated so far. The "tail" refers to
+  // all blocks written after data blocks (index + filter). This value helps
+  // estimate the total file size when deciding when to cut files.
+  virtual uint64_t EstimatedTailSize() const { return 0; }
 
   virtual uint64_t GetTailSize() const { return 0; }
 

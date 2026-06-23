@@ -315,7 +315,8 @@ class PartitionedFilterBlockTest
         std::string(*InternalKey(user_key, 0, ValueType::kTypeValue).rep());
     BlockHandle dont_care_block_handle(1, 1);
     std::string scratch;
-    builder->AddIndexEntry(key, nullptr, dont_care_block_handle, &scratch);
+    builder->AddIndexEntry(key, nullptr, dont_care_block_handle, &scratch,
+                           false);
   }
 
   void CutABlock(PartitionedIndexBuilder* builder, const std::string& user_key,
@@ -327,7 +328,8 @@ class PartitionedFilterBlockTest
     BlockHandle dont_care_block_handle(1, 1);
     Slice slice = Slice(next_key.data(), next_key.size());
     std::string scratch;
-    builder->AddIndexEntry(key, &slice, dont_care_block_handle, &scratch);
+    builder->AddIndexEntry(key, &slice, dont_care_block_handle, &scratch,
+                           false);
   }
 
   int CountNumOfIndexPartitions(PartitionedIndexBuilder* builder) {
@@ -348,7 +350,7 @@ INSTANTIATE_TEST_CASE_P(
     FormatVersions, PartitionedFilterBlockTest,
     testing::Combine(
         testing::ValuesIn(std::set<uint32_t>{
-            2, 3, 4, 5, test::kDefaultFormatVersion, kLatestFormatVersion}),
+            2, 3, 4, 5, test::kDefaultFormatVersion, kLatestBbtFormatVersion}),
         testing::ValuesIn(test::GetUDTTestModes()), testing::Bool()));
 
 TEST_P(PartitionedFilterBlockTest, EmptyBuilder) {

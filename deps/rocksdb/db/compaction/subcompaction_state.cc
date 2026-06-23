@@ -38,11 +38,11 @@ OutputIterator SubcompactionState::GetOutputs() const {
                         compaction_outputs_.outputs_);
 }
 
-void SubcompactionState::Cleanup(Cache* cache) {
+void SubcompactionState::Cleanup(Cache* cache, const Status& overall_status) {
   proximal_level_outputs_.Cleanup();
   compaction_outputs_.Cleanup();
 
-  if (!status.ok()) {
+  if (!status.ok() || !overall_status.ok()) {
     for (const auto& out : GetOutputs()) {
       // If this file was inserted into the table cache then remove it here
       // because this compaction was not committed. This is not strictly
@@ -108,11 +108,13 @@ Slice SubcompactionState::LargestUserKey() const {
 Status SubcompactionState::AddToOutput(
     const CompactionIterator& iter, bool use_proximal_output,
     const CompactionFileOpenFunc& open_file_func,
-    const CompactionFileCloseFunc& close_file_func) {
+    const CompactionFileCloseFunc& close_file_func,
+    const ParsedInternalKey& prev_iter_output_internal_key) {
   // update target output
   current_outputs_ =
       use_proximal_output ? &proximal_level_outputs_ : &compaction_outputs_;
-  return current_outputs_->AddToOutput(iter, open_file_func, close_file_func);
+  return current_outputs_->AddToOutput(iter, open_file_func, close_file_func,
+                                       prev_iter_output_internal_key);
 }
 
 }  // namespace ROCKSDB_NAMESPACE

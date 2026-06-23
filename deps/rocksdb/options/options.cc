@@ -63,6 +63,7 @@ AdvancedColumnFamilyOptions::AdvancedColumnFamilyOptions(const Options& options)
       level0_stop_writes_trigger(options.level0_stop_writes_trigger),
       target_file_size_base(options.target_file_size_base),
       target_file_size_multiplier(options.target_file_size_multiplier),
+      target_file_size_is_upper_bound(options.target_file_size_is_upper_bound),
       level_compaction_dynamic_level_bytes(
           options.level_compaction_dynamic_level_bytes),
       max_bytes_for_level_multiplier(options.max_bytes_for_level_multiplier),
@@ -114,7 +115,9 @@ AdvancedColumnFamilyOptions::AdvancedColumnFamilyOptions(const Options& options)
       persist_user_defined_timestamps(options.persist_user_defined_timestamps),
       memtable_op_scan_flush_trigger(options.memtable_op_scan_flush_trigger),
       memtable_avg_op_scan_flush_trigger(
-          options.memtable_avg_op_scan_flush_trigger) {
+          options.memtable_avg_op_scan_flush_trigger),
+      memtable_batch_lookup_optimization(
+          options.memtable_batch_lookup_optimization) {
   assert(memtable_factory.get() != nullptr);
   if (max_bytes_for_level_multiplier_additional.size() <
       static_cast<unsigned int>(num_levels)) {
@@ -269,6 +272,9 @@ void ColumnFamilyOptions::Dump(Logger* log) const {
                    target_file_size_base);
   ROCKS_LOG_HEADER(log, "            Options.target_file_size_multiplier: %d",
                    target_file_size_multiplier);
+  ROCKS_LOG_HEADER(log,
+                   "           Options.target_file_size_is_upper_bound: %d",
+                   target_file_size_is_upper_bound);
   ROCKS_LOG_HEADER(log,
                    "               Options.max_bytes_for_level_base: %" PRIu64,
                    max_bytes_for_level_base);
@@ -464,6 +470,8 @@ void ColumnFamilyOptions::Dump(Logger* log) const {
                    memtable_max_range_deletions);
   ROCKS_LOG_HEADER(log, "                 Options.cf_allow_ingest_behind: %s",
                    cf_allow_ingest_behind ? "true" : "false");
+  ROCKS_LOG_HEADER(log, "  Options.memtable_batch_lookup_optimization: %s",
+                   memtable_batch_lookup_optimization ? "true" : "false");
 }  // ColumnFamilyOptions::Dump
 
 void Options::Dump(Logger* log) const {

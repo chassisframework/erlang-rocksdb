@@ -267,6 +267,9 @@ void DBImpl::FindObsoleteFiles(JobContext* job_context, bool force,
     if (!job_context->HaveSomethingToDelete()) {
       mutex_.AssertHeld();
       --pending_purge_obsolete_files_;
+      if (pending_purge_obsolete_files_ == 0) {
+        bg_cv_.SignalAll();
+      }
     }
   });
 
@@ -443,7 +446,7 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
       state.manifest_delete_files.size());
   // We may ignore the dbname when generating the file names.
   for (auto& file : state.sst_delete_files) {
-    auto* handle = file.metadata->table_reader_handle;
+    auto* handle = file.metadata->fd.pinned_reader.GetCacheHandle();
     if (file.only_delete_metadata) {
       if (handle) {
         // Simply release handle of file that is not being deleted
@@ -613,6 +616,11 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
         break;
       case kOptionsFile:
         keep = (number >= optsfile_num2);
+        break;
+      case kCompactionProgressFile:
+        // Keep compaction progress files - they are managed
+        // separately by DBImplSecondary for now
+        keep = true;
         break;
       case kCurrentFile:
       case kDBLockFile:

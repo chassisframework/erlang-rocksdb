@@ -17,6 +17,7 @@
 #include "db/db_impl/db_impl.h"
 #include "db/error_handler.h"
 #include "db/version_set.h"
+#include "file/filename.h"
 #include "file/random_access_file_reader.h"
 #include "file/writable_file_writer.h"
 #include "options/options_helper.h"
@@ -210,12 +211,12 @@ class CompactionJobTestBase : public testing::Test {
         table_cache_(NewLRUCache(50000, 16)),
         write_buffer_manager_(db_options_.db_write_buffer_size),
         versions_(new VersionSet(
-            dbname_, &db_options_, env_options_, table_cache_.get(),
-            &write_buffer_manager_, &write_controller_,
+            dbname_, &db_options_, mutable_db_options_, env_options_,
+            table_cache_.get(), &write_buffer_manager_, &write_controller_,
             /*block_cache_tracer=*/nullptr,
             /*io_tracer=*/nullptr, /*db_id=*/"", /*db_session_id=*/"",
             /*daily_offpeak_time_utc=*/"",
-            /*error_handler=*/nullptr, /*read_only=*/false)),
+            /*error_handler=*/nullptr, /*unchanging=*/false)),
         shutting_down_(false),
         mock_table_factory_(new mock::MockTableFactory()),
         error_handler_(nullptr, db_options_, &mutex_),
@@ -545,13 +546,13 @@ class CompactionJobTestBase : public testing::Test {
     ASSERT_OK(s);
     db_options_.info_log = info_log;
 
-    versions_.reset(
-        new VersionSet(dbname_, &db_options_, env_options_, table_cache_.get(),
-                       &write_buffer_manager_, &write_controller_,
-                       /*block_cache_tracer=*/nullptr, /*io_tracer=*/nullptr,
-                       test::kUnitTestDbId, /*db_session_id=*/"",
-                       /*daily_offpeak_time_utc=*/"",
-                       /*error_handler=*/nullptr, /*read_only=*/false));
+    versions_.reset(new VersionSet(
+        dbname_, &db_options_, mutable_db_options_, env_options_,
+        table_cache_.get(), &write_buffer_manager_, &write_controller_,
+        /*block_cache_tracer=*/nullptr, /*io_tracer=*/nullptr,
+        test::kUnitTestDbId, /*db_session_id=*/"",
+        /*daily_offpeak_time_utc=*/"",
+        /*error_handler=*/nullptr, /*unchanging=*/false));
     compaction_job_stats_.Reset();
 
     VersionEdit new_db;
@@ -675,8 +676,8 @@ class CompactionJobTestBase : public testing::Test {
         &event_logger, false, false, dbname_, &compaction_job_stats_,
         Env::Priority::USER, nullptr /* IOTracer */,
         /*manual_compaction_canceled=*/kManualCompactionCanceledFalse,
-        env_->GenerateUniqueId(), DBImpl::GenerateDbSessionId(nullptr),
-        full_history_ts_low_);
+        CompactionJob::kCompactionAbortedFalse, env_->GenerateUniqueId(),
+        DBImpl::GenerateDbSessionId(nullptr), full_history_ts_low_);
     VerifyInitializationOfCompactionJobStats(compaction_job_stats_);
 
     compaction_job.Prepare(std::nullopt /*subcompact to be computed*/);
@@ -2408,7 +2409,6 @@ TEST_F(CompactionJobIOPriorityTest, GetRateLimiterPriority) {
                 kMaxSequenceNumber, 1, false, {kInvalidBlobFileNumber}, true,
                 Env::IO_LOW, Env::IO_LOW);
 }
-
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {
